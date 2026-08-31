@@ -1,0 +1,12 @@
+{
+  "name": "domain-access-check",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "구글시트 접속점검 탭의 도메인을 한국 IP로 접속 점검 → 시트 결과 기록 + 텔레그램 발송",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "check": "node check.js",
+    "test": "node test/check.test.mjs && node test/bridge.sim.mjs"
+  }
+}

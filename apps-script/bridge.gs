@@ -1,0 +1,1542 @@
+/**
+ * 접속점검 브리지 (Google Apps Script) — 시트 + 텔레그램 전체 조작 + 스케줄
+ * ─────────────────────────────────────────────────────────────────────────
+ * 이 스크립트 하나가 '두뇌' 역할을 한다. 서버·요금·카드 등록이 필요 없다.
+ *
+ *   담당자 ──텔레그램 채널──▶ 이 스크립트 ──▶ 구글시트 (즉시 반영)
+ *                                    └──▶ GitHub Actions (한국 IP 점검) ──▶ 결과 회신
+ *
+ * 담당자가 채널에서 할 수 있는 것(전부):
+ *   도메인 추가·삭제·주소변경·업체이동 / 업체 추가·삭제·이름변경 / 목록·상태 보기
+ *   지금 점검 / 점검시각 변경 / 알림수준 변경 / 일시중지·재개 / 되돌리기 / 도움말
+ *
+ * 시트 탭 (자동 생성)
+ *   접속점검  담당자가 관리하는 도메인 목록(1행 업체명, 열 하나=업체, 세로로 주소)
+ *   결과      최근 점검 결과 표
+ *   이력      누가 언제 무엇을 바꿨나
+ *   시스템    잘 돌고 있는지(마지막 점검·설정·오류) ← 운영자 모니터링용
+ *   _백업     되돌리기용(숨김)
+ *
+ * 스크립트 속성 (⚙️ 프로젝트 설정 → 스크립트 속성)
+ *   [필수] ACCESS_TOKEN      웹앱 URL 잠금용 아무 문자열. GitHub SHEET_BRIDGE_TOKEN 과 동일하게.
+ *   [필수] BOT_TOKEN         텔레그램 봇 토큰
+ *   [필수] ALLOWED_CHAT_IDS  조작을 허용할 채널 chat_id(쉼표로 여러 개). 비면 조작 전면 거부.
+ *   [필수] GITHUB_TOKEN      GitHub Fine-grained 토큰(Actions: Read and write)
+ *   [필수] GITHUB_REPO       예) myid/domain-access-check
+ *   [선택] WORKFLOW_FILE     기본 check.yml
+ *   [선택] GIT_REF           기본 main
+ *   [선택] WEBHOOK_SECRET    텔레그램 비밀헤더(아무 문자열). 넣으면 보안이 한 단계 더 올라감.
+ *   [선택] WEBAPP_URL        setupAll 이 URL을 못 찾을 때만 직접 지정(/exec 로 끝나는 주소)
+ *   [선택] GITHUB_TOKEN_EXPIRES  GitHub 토큰 만료일(YYYY-MM-DD). 30일 전부터 채널에 알림.
+ *
+ * ※ 코드를 고친 뒤에는 [배포 → 배포 관리 → 편집 → 새 버전]으로 재배포해야 반영된다.
+ */
+
+// ═══════════════════════════════════════════════════════════════════
+// 설정값
+// ═══════════════════════════════════════════════════════════════════
+var SHEET_INPUT  = '접속점검';
+var SHEET_RESULT = '결과';
+var SHEET_LOG    = '이력';
+var SHEET_SYS    = '시스템';
+var SHEET_BACKUP = '_백업';
+
+var MAX_COMPANIES = 15;      // A~O
+var MAX_DOMAINS_PER_CO = 200;
+var LOG_KEEP = 500;          // 이력 최대 보관 행수
+var STATE_TTL = 300;         // 대화 상태 유지 시간(초)
+var TG_LIMIT = 3500;         // 텔레그램 메시지 분할 기준(한도 4096보다 여유 있게)
+var WATCHDOG_MIN = 25;       // 점검 요청 후 이 시간 안에 결과가 없으면 경고
+
+var COL_LETTERS = 'ABCDEFGHIJKLMNO';
+
+// ═══════════════════════════════════════════════════════════════════
+// <<<PURE-LOGIC-START>>>  ※ lib/core.js 와 **완전히 같은 알고리즘**이어야 한다.
+//    test/check.test.mjs 가 이 블록을 잘라내어 core.js 와 대조 검증한다.
+// ═══════════════════════════════════════════════════════════════════
+function isIPv4_(host) {
+  var parts = String(host).split('.');
+  if (parts.length !== 4) return false;
+  for (var i = 0; i < 4; i++) {
+    var p = parts[i];
+    if (!/^\d{1,3}$/.test(p)) return false;
+    if (Number(p) > 255) return false;
+    if (String(Number(p)) !== p) return false;
+  }
+  return true;
+}
+
+function normalizeDomain_(raw) {
+  if (raw === null || raw === undefined) return null;
+  var s = String(raw).trim();
+  if (!s) return null;
+  s = s.replace(/^[\s"'`<([]+/, '').replace(/[\s"'`>)\],.;]+$/, '');
+  if (!s) return null;
+  if (/\s/.test(s)) return null;
+
+  s = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '');
+  s = s.split('/')[0].split('?')[0].split('#')[0];
+  s = s.replace(/^[^@]*@/, '');
+  s = s.replace(/:\d+$/, '');
+  s = s.toLowerCase().replace(/\.+$/, '');
+  if (s.indexOf('www.') === 0) s = s.slice(4);
+
+  if (!s || s.length > 253) return null;
+  if (s.indexOf('.') === -1) return null;
+  if (isIPv4_(s)) return s;
+  if (s.indexOf(':') !== -1 || s.indexOf('[') !== -1) return null;
+
+  var labels = s.split('.');
+  if (labels.length < 2) return null;
+  for (var i = 0; i < labels.length; i++) {
+    var l = labels[i];
+    if (!l || l.length > 63) return null;
+    if (l.charAt(0) === '-' || l.charAt(l.length - 1) === '-') return null;
+    if (!/^[a-z0-9à-ÿЀ-ӿ぀-ヿ㐀-鿿가-힣-]+$/.test(l)) return null;
+  }
+  var tld = labels[labels.length - 1];
+  if (!/^([a-z]{2,}|xn--[a-z0-9-]+)$/.test(tld)) return null;
+  return s;
+}
+// <<<PURE-LOGIC-END>>>
+
+// ═══════════════════════════════════════════════════════════════════
+// 공통 유틸
+// ═══════════════════════════════════════════════════════════════════
+function props_() { return PropertiesService.getScriptProperties(); }
+
+function prop_(key, fallback) {
+  var v = props_().getProperty(key);
+  return (v === null || v === '') ? (fallback === undefined ? '' : fallback) : v;
+}
+
+function setProp_(key, value) { props_().setProperty(key, String(value)); }
+
+function json_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function esc_(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * 시트에 쓰기 전 안전 처리.
+ * 구글시트는 = + - @ 로 시작하는 글자를 '수식'으로 실행한다.
+ * 누군가 업체명이나 결과값에 =IMPORTXML(...) 같은 걸 넣으면
+ * 시트 주인 계정이 그 주소로 접속해 데이터를 밖으로 보내게 된다 → 앞에 ' 를 붙여 글자로 고정.
+ */
+function safeCell_(v) {
+  if (typeof v === 'number' || typeof v === 'boolean') return v;
+  if (v === null || v === undefined) return '';
+  var s = String(v);
+  if (/^[=+\-@\t\r]/.test(s)) return "'" + s;
+  return s;
+}
+
+function safeRow_(row) {
+  var out = [];
+  for (var i = 0; i < row.length; i++) out.push(safeCell_(row[i]));
+  return out;
+}
+
+/** UTF-8 바이트 기준으로 자른다 — 앱스스크립트 속성은 글자수가 아니라 바이트(9KB)로 제한된다 */
+function byteLen_(s) {
+  return Utilities.newBlob(String(s)).getBytes().length;
+}
+
+/** 텔레그램 리포트를 안전하게 보관용으로 줄인다: 인용블록 경계에서만 자르고, 바이트 상한을 지킨다 */
+function trimReport_(text, maxBytes) {
+  var t = String(text || '');
+  if (byteLen_(t) <= maxBytes) return t;
+  var blocks = t.split('\n\n');
+  var out = '';
+  for (var i = 0; i < blocks.length; i++) {
+    var next = out ? out + '\n\n' + blocks[i] : blocks[i];
+    if (byteLen_(next) > maxBytes - 60) break;
+    out = next;
+  }
+  return out ? out + '\n\n(이하 생략 — 전체는 시트 결과 탭에서)' : '(리포트가 너무 길어 보관하지 못했습니다)';
+}
+
+function nowKst_() {
+  return Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
+}
+
+function kstHour_() {
+  return Number(Utilities.formatDate(new Date(), 'Asia/Seoul', 'H'));
+}
+
+function kstDayHourKey_() {
+  return Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMddHH');
+}
+
+function ss_() { return SpreadsheetApp.getActive(); }
+
+function sheet_(name, create) {
+  var sh = ss_().getSheetByName(name);
+  if (!sh && create) sh = ss_().insertSheet(name);
+  return sh;
+}
+
+function withLock_(fn) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) throw new Error('다른 작업이 진행 중입니다. 잠시 뒤 다시 시도해 주세요.');
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 설정 (담당자가 채널에서 바꿀 수 있는 값)
+// ═══════════════════════════════════════════════════════════════════
+function settings_() {
+  var hours = prop_('CHECK_HOURS', '9,21').split(',')
+    .filter(function (h) { return /^\s*\d+\s*$/.test(h); })
+    .map(function (h) { return Number(String(h).trim()); })
+    .filter(function (h) { return h >= 0 && h <= 23; });
+  if (!hours.length) hours = [9, 21];
+  return {
+    hours: hours,
+    notify: prop_('NOTIFY_LEVEL', 'all') === 'problem' ? 'problem' : 'all',
+    paused: prop_('PAUSED', 'no') === 'yes',
+  };
+}
+
+function settingsText_() {
+  var s = settings_();
+  return [
+    '⚙️ 현재 설정',
+    '',
+    '<blockquote>점검 시각 : 매일 ' + s.hours.map(function (h) { return ('0' + h).slice(-2) + '시'; }).join(' · ') + ' (한국시간)',
+    '알림 수준 : ' + (s.notify === 'all' ? '항상 받기(정상이어도 발송)' : '문제 있을 때만'),
+    '자동 점검 : ' + (s.paused ? '⏸ 일시중지됨' : '▶️ 켜짐') + '</blockquote>',
+  ].join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 데이터 모델 — '접속점검' 탭 읽기/쓰기
+// ═══════════════════════════════════════════════════════════════════
+/** → [{name:'에그벳', domains:['a.com', ...]}, ...] */
+function loadModel_() {
+  var sh = sheet_(SHEET_INPUT, true);
+  var lastRow = Math.max(1, sh.getLastRow());
+  var lastCol = Math.min(Math.max(1, sh.getLastColumn()), MAX_COMPANIES);
+  var v = sh.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+
+  var out = [];
+  for (var c = 0; c < lastCol; c++) {
+    var name = String((v[0] || [])[c] || '').trim();
+    var list = [];
+    for (var r = 1; r < lastRow; r++) {
+      var t = String((v[r] || [])[c] || '').trim();
+      if (!t) continue;
+      var d = normalizeDomain_(t);
+      if (d && list.indexOf(d) === -1) list.push(d);
+    }
+    if (name || list.length) out.push({ name: name || (COL_LETTERS.charAt(c) + '열'), domains: list });
+  }
+  return out;
+}
+
+function saveModel_(model) {
+  var sh = sheet_(SHEET_INPUT, true);
+  var maxLen = 0;
+  for (var i = 0; i < model.length; i++) maxLen = Math.max(maxLen, model[i].domains.length);
+
+  // 예전 내용이 남지 않도록 '예전에 쓰던 범위'까지 함께 덮어쓴다(빈칸으로).
+  // 단 P열(16번째) 이후는 건드리지 않는다 — 사람이 적어둔 메모가 지워지면 안 되니까.
+  var oldRows = Math.max(1, sh.getLastRow());
+  var oldCols = Math.min(MAX_COMPANIES, Math.max(1, sh.getLastColumn()));
+  var rows = Math.max(1 + maxLen, oldRows);
+  var cols = Math.max(Math.min(MAX_COMPANIES, model.length), oldCols, 1);
+
+  var grid = [];
+  for (var r = 0; r < rows; r++) {
+    var row = [];
+    for (var c = 0; c < cols; c++) {
+      if (r === 0) row.push(model[c] ? safeCell_(model[c].name) : '');
+      else row.push(model[c] && model[c].domains[r - 1] ? safeCell_(model[c].domains[r - 1]) : '');
+    }
+    grid.push(row);
+  }
+
+  sh.getRange(1, 1, grid.length, cols).setValues(grid);
+  sh.getRange(1, 1, 1, cols).setFontWeight('bold').setBackground('#E8F0FE');
+  sh.setFrozenRows(1);
+  try { sh.autoResizeColumns(1, cols); } catch (ignore) {}
+}
+
+function totalDomains_(model) {
+  var n = 0;
+  for (var i = 0; i < model.length; i++) n += model[i].domains.length;
+  return n;
+}
+
+function findCompany_(model, name) {
+  var key = String(name || '').trim().toLowerCase();
+  for (var i = 0; i < model.length; i++) {
+    if (model[i].name.trim().toLowerCase() === key) return i;
+  }
+  return -1;
+}
+
+/** 도메인이 어느 업체에 있는지 → [{ci, di}] */
+function findDomain_(model, domain) {
+  var d = normalizeDomain_(domain);
+  var hits = [];
+  if (!d) return hits;
+  for (var i = 0; i < model.length; i++) {
+    var j = model[i].domains.indexOf(d);
+    if (j !== -1) hits.push({ ci: i, di: j });
+  }
+  return hits;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 되돌리기 (직전 상태 1회 보관)
+// ═══════════════════════════════════════════════════════════════════
+function snapshot_(label) {
+  var src = sheet_(SHEET_INPUT, true);
+  var bk = sheet_(SHEET_BACKUP, true);
+  bk.clearContents();
+  var lastRow = Math.max(1, src.getLastRow());
+  var lastCol = Math.max(1, src.getLastColumn());
+  var v = src.getRange(1, 1, lastRow, lastCol).getDisplayValues();
+  bk.getRange(1, 1, v.length, v[0].length).setValues(v);
+  try { bk.hideSheet(); } catch (ignore) {}
+  setProp_('UNDO_LABEL', label || '변경');
+  setProp_('UNDO_AT', nowKst_());
+}
+
+function undo_() {
+  var bk = sheet_(SHEET_BACKUP, false);
+  if (!bk || bk.getLastRow() < 1) throw new Error('되돌릴 내용이 없습니다.');
+  var v = bk.getRange(1, 1, bk.getLastRow(), Math.max(1, bk.getLastColumn())).getDisplayValues();
+
+  // 지금 상태를 다시 백업(되돌리기의 되돌리기)
+  var cur = sheet_(SHEET_INPUT, true);
+  var curV = cur.getRange(1, 1, Math.max(1, cur.getLastRow()), Math.max(1, cur.getLastColumn())).getDisplayValues();
+
+  cur.clearContents();
+  cur.getRange(1, 1, v.length, v[0].length).setValues(v);
+  cur.getRange(1, 1, 1, v[0].length).setFontWeight('bold').setBackground('#E8F0FE');
+  cur.setFrozenRows(1);
+
+  bk.clearContents();
+  bk.getRange(1, 1, curV.length, curV[0].length).setValues(curV);
+
+  var label = prop_('UNDO_LABEL', '변경');
+  setProp_('UNDO_LABEL', '되돌리기');
+  return label;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 이력
+// ═══════════════════════════════════════════════════════════════════
+function log_(actor, action, detail) {
+  try {
+    var sh = sheet_(SHEET_LOG, true);
+    if (sh.getLastRow() === 0) {
+      sh.getRange(1, 1, 1, 4).setValues([['시각', '누가', '무엇을', '상세']])
+        .setFontWeight('bold').setBackground('#F1F3F4');
+      sh.setFrozenRows(1);
+    }
+    sh.appendRow(safeRow_([nowKst_(), actor || '담당자', action, detail || '']));
+    var over = sh.getLastRow() - 1 - LOG_KEEP;
+    if (over > 0) sh.deleteRows(2, over);
+  } catch (e) {
+    // 이력 실패가 본 작업을 막지 않도록 무시
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 시스템 탭 (운영자 모니터링)
+// ═══════════════════════════════════════════════════════════════════
+function sysWrite_(extra) {
+  try {
+    var sh = sheet_(SHEET_SYS, true);
+    var s = settings_();
+    var model = loadModel_();
+    var rows = [
+      ['항목', '값'],
+      ['현재 시각(KST)', nowKst_()],
+      ['등록 업체', model.length + '곳'],
+      ['등록 도메인', totalDomains_(model) + '개'],
+      ['점검 시각', s.hours.map(function (h) { return ('0' + h).slice(-2) + '시'; }).join(' · ')],
+      ['알림 수준', s.notify === 'all' ? '항상' : '문제만'],
+      ['자동 점검', s.paused ? '⏸ 일시중지' : '▶️ 켜짐'],
+      ['마지막 점검 요청', prop_('LAST_DISPATCH_AT', '-')],
+      ['마지막 결과 도착', prop_('LAST_RESULT_AT', '-')],
+      ['마지막 결과 요약', prop_('LAST_RESULT_SUMMARY', '-')],
+      ['실행 상태', prop_('RUN_STATE', '대기')],
+      ['마지막 오류', prop_('LAST_ERROR', '-')],
+      ['GitHub 토큰 만료일', prop_('GITHUB_TOKEN_EXPIRES', '(미입력)')],
+    ];
+    if (extra) rows.push(['비고', extra]);
+    rows = rows.map(safeRow_);
+
+    sh.clear();
+    sh.getRange(1, 1, rows.length, 2).setValues(rows);
+    sh.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#F1F3F4');
+    sh.setFrozenRows(1);
+    try { sh.autoResizeColumns(1, 2); } catch (ignore) {}
+  } catch (e) {
+    // 모니터링 실패가 본 작업을 막지 않도록 무시
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 텔레그램 송신
+// ═══════════════════════════════════════════════════════════════════
+/**
+ * 텔레그램 호출.
+ * ★ 예전엔 응답을 확인하지 않아, 글자 서식이 깨지면 메시지가 '조용히 안 감' → 버튼이 영구 먹통처럼 보였다.
+ *   이제 실패를 확인해서 ① 서식 없이 다시 보내고 ② 시스템 탭에 남긴다.
+ */
+function tgApi_(method, payload, noRetry) {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot) return null;
+  var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/' + method, {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+  var body = null;
+  try { body = JSON.parse(res.getContentText()); } catch (e) { body = null; }
+  if (body && body.ok) return body;
+
+  var desc = (body && body.description) || ('HTTP ' + res.getResponseCode());
+  if (/message is not modified/i.test(desc)) return body;      // 같은 화면 다시 누른 것 — 정상
+
+  if (!noRetry && payload && payload.parse_mode) {
+    // 서식 때문에 실패한 경우 → 태그를 벗겨서라도 반드시 전달한다
+    var plain = {};
+    for (var k in payload) if (k !== 'parse_mode') plain[k] = payload[k];
+    if (plain.text) {
+      plain.text = String(plain.text).replace(/<[^>]+>/g, '')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    }
+    var retry = tgApi_(method, plain, true);
+    if (retry && retry.ok) {
+      try { setProp_('LAST_ERROR', nowKst_() + ' 텔레그램 서식 오류(평문으로 대체 발송): ' + desc.slice(0, 120)); } catch (i1) {}
+      return retry;
+    }
+  }
+  try { setProp_('LAST_ERROR', nowKst_() + ' 텔레그램 ' + method + ' 실패: ' + desc.slice(0, 150)); } catch (i2) {}
+  return body;
+}
+
+// <<<PURE-SPLIT-START>>> (check.js 의 splitForTelegram 과 같은 알고리즘 — 테스트가 대조한다)
+function splitForTelegram_(text, limit) {
+  limit = limit || TG_LIMIT;
+  if (text.length <= limit) return [text];
+  var blocks = text.split('\n\n');
+  var chunks = [], buf = '';
+  function flush() { if (buf) { chunks.push(buf); buf = ''; } }
+
+  for (var i = 0; i < blocks.length; i++) {
+    var b = blocks[i];
+    if (b.length > limit) {
+      flush();
+      var m = /^<blockquote>([\s\S]*)<\/blockquote>$/.exec(b);
+      var body = m ? m[1] : b;
+      var wrapL = m ? '<blockquote>' : '', wrapR = m ? '</blockquote>' : '';
+      var lines = body.split('\n'), buf2 = '';
+      for (var k = 0; k < lines.length; k++) {
+        if (buf2 && (wrapL + buf2 + '\n' + lines[k] + wrapR).length > limit) { chunks.push(wrapL + buf2 + wrapR); buf2 = ''; }
+        buf2 = buf2 ? buf2 + '\n' + lines[k] : lines[k];
+      }
+      if (buf2) chunks.push(wrapL + buf2 + wrapR);
+      continue;
+    }
+    if (buf && (buf + '\n\n' + b).length > limit) flush();
+    buf = buf ? buf + '\n\n' + b : b;
+  }
+  flush();
+  return chunks;
+}
+// <<<PURE-SPLIT-END>>>
+
+function tgSend_(chatId, text, keyboard) {
+  if (!chatId) return null;
+  var parts = splitForTelegram_(text);
+  var last = null;
+  for (var i = 0; i < parts.length; i++) {
+    var payload = {
+      chat_id: chatId,
+      text: (parts.length > 1 ? '(' + (i + 1) + '/' + parts.length + ')\n' : '') + parts[i],
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    };
+    if (keyboard && i === parts.length - 1) payload.reply_markup = keyboard;
+    last = tgApi_('sendMessage', payload);
+  }
+  return last;
+}
+
+function tgEdit_(chatId, messageId, text, keyboard) {
+  if (text.length > TG_LIMIT) return tgSend_(chatId, text, keyboard);
+  return tgApi_('editMessageText', {
+    chat_id: chatId, message_id: messageId, text: text,
+    parse_mode: 'HTML', disable_web_page_preview: true,
+    reply_markup: keyboard || { inline_keyboard: [] },
+  });
+}
+
+function tgAnswer_(cbId, text) {
+  tgApi_('answerCallbackQuery', { callback_query_id: cbId, text: text || '' });
+}
+
+/** 결과 채널(설정된 첫 chat_id)로 알림 */
+function notifyChannel_(text, keyboard) {
+  var ids = allowedChats_();
+  if (!ids.length) return;
+  tgSend_(ids[0], text, keyboard);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 키보드(버튼)
+// ═══════════════════════════════════════════════════════════════════
+function kbMain_() {
+  return { inline_keyboard: [
+    [{ text: '🔍 지금 점검', callback_data: 'run' }, { text: '📋 목록 보기', callback_data: 'list' }],
+    [{ text: '➕ 도메인 추가', callback_data: 'add' }, { text: '🗑 도메인 삭제', callback_data: 'del' }],
+    [{ text: '🏢 업체 관리', callback_data: 'co' }, { text: '⚙️ 설정', callback_data: 'cfg' }],
+    [{ text: '↩️ 되돌리기', callback_data: 'undo' }, { text: '❓ 도움말', callback_data: 'help' }],
+  ] };
+}
+
+function kbBack_() {
+  return { inline_keyboard: [[{ text: '◀️ 메뉴로', callback_data: 'm' }]] };
+}
+
+function kbCompanies_(model, prefix, extraRows) {
+  var rows = [], row = [];
+  for (var i = 0; i < model.length; i++) {
+    row.push({ text: model[i].name, callback_data: prefix + ':' + i });
+    if (row.length === 2) { rows.push(row); row = []; }
+  }
+  if (row.length) rows.push(row);
+  if (extraRows) for (var k = 0; k < extraRows.length; k++) rows.push(extraRows[k]);
+  rows.push([{ text: '◀️ 메뉴로', callback_data: 'm' }]);
+  return { inline_keyboard: rows };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 대화 상태 (채널 단위 + 잠금)
+// ═══════════════════════════════════════════════════════════════════
+function cache_() { return CacheService.getScriptCache(); }
+
+function getState_(chatId) {
+  var raw = cache_().get('state:' + chatId);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function setState_(chatId, state) {
+  cache_().put('state:' + chatId, JSON.stringify(state), STATE_TTL);
+}
+
+function clearState_(chatId) { cache_().remove('state:' + chatId); }
+
+/**
+ * 채널은 여러 담당자가 함께 씁니다. A가 '추가' 중인데 B가 '삭제'를 시작하면
+ * A가 보낸 주소가 B의 절차로 흘러들어갈 수 있습니다 —
+ * 채널 글에는 '누가 썼는지'가 없어 구분이 안 되기 때문입니다.
+ * 그래서 진행 중인 절차가 있으면 2분간 다른 사람의 새 절차를 막습니다.
+ * → null 이면 진행 가능, 문자열이면 그 안내문을 보여주고 중단.
+ */
+function busyBy_(chatId, actor) {
+  var st = getState_(chatId);
+  if (!st || !st.at) return null;
+  if (String(st.by || '') === String(actor || '')) return null;
+  if (Date.now() - st.at > 120000) return null;
+  return '⏳ ' + esc_(st.by || '다른 담당자') + '님이 지금 작업 중입니다.\n\n<blockquote>2분이 지나면 자동으로 풀립니다. 잠시 뒤 다시 눌러주세요.</blockquote>';
+}
+
+/** 텔레그램이 같은 알림을 재전송해도 두 번 실행되지 않게 한다 */
+function seenUpdate_(updateId) {
+  if (!updateId && updateId !== 0) return false;
+  var key = 'upd:' + updateId;
+  if (cache_().get(key)) return true;
+  cache_().put(key, '1', 600);
+  return false;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 권한
+// ═══════════════════════════════════════════════════════════════════
+function allowedChats_() {
+  return prop_('ALLOWED_CHAT_IDS', '').split(',')
+    .map(function (s) { return String(s).trim(); })
+    .filter(function (s) { return !!s; });
+}
+
+function canControl_(chatId) {
+  var ids = allowedChats_();
+  if (!ids.length) return false;                 // 미설정 = 조작 전면 거부(안전 기본값)
+  return ids.indexOf(String(chatId)) !== -1;
+}
+
+function actorOf_(msg, from) {
+  if (from) {
+    var n = [from.first_name, from.last_name].filter(Boolean).join(' ');
+    return n || ('id' + from.id);
+  }
+  if (msg && msg.from) {
+    var m = [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' ');
+    return m || ('id' + msg.from.id);
+  }
+  if (msg && msg.author_signature) return msg.author_signature;
+  return '담당자';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 화면 만들기
+// ═══════════════════════════════════════════════════════════════════
+function menuText_() {
+  var model = loadModel_();
+  var s = settings_();
+  var lines = [
+    '🎛 <b>접속점검 관리</b>',
+    '',
+    '<blockquote>업체 ' + model.length + '곳 · 도메인 ' + totalDomains_(model) + '개',
+    '점검 시각 ' + s.hours.map(function (h) { return ('0' + h).slice(-2) + '시'; }).join(' · ') +
+      (s.paused ? '  ⏸ 일시중지' : '') ,
+    '마지막 점검 ' + esc_(prop_('LAST_RESULT_AT', '-')),
+    esc_(prop_('LAST_RESULT_SUMMARY', '아직 점검 기록이 없습니다')) + '</blockquote>',
+  ];
+  return lines.join('\n');
+}
+
+function listText_() {
+  var model = loadModel_();
+  if (!model.length) return '📋 등록된 도메인이 없습니다.\n\n<blockquote>[➕ 도메인 추가] 로 시작해 보세요.</blockquote>';
+  var parts = ['📋 <b>등록된 도메인</b> (총 ' + totalDomains_(model) + '개)'];
+  for (var i = 0; i < model.length; i++) {
+    var c = model[i];
+    var lines = ['〔' + esc_(c.name) + '〕 ' + c.domains.length + '개'];
+    if (!c.domains.length) lines.push('(비어 있음)');
+    for (var j = 0; j < c.domains.length; j++) lines.push(esc_(c.domains[j]));
+    parts.push('<blockquote>' + lines.join('\n') + '</blockquote>');
+  }
+  return parts.join('\n\n');
+}
+
+function helpText_() {
+  return [
+    '❓ <b>사용법</b>',
+    '',
+    '<blockquote>버튼으로 전부 할 수 있습니다. [메뉴] 를 입력하면 버튼이 나옵니다.</blockquote>',
+    '',
+    '⌨️ 글로 바로 쓰는 방법',
+    '',
+    '<blockquote>점검                     지금 점검',
+    '목록                     전체 보기',
+    '상태                     마지막 결과 다시 보기',
+    '추가 에그벳 a.com b.com   업체에 주소 추가',
+    '삭제 a.com               주소 삭제',
+    '변경 a.com b.com         주소 갈아끼우기',
+    '이동 a.com 야옹이         다른 업체로 옮기기',
+    '업체추가 새업체',
+    '업체삭제 에그벳',
+    '이름변경 에그벳 에그벳2',
+    '점검시각 9 21            매일 09시·21시로',
+    '알림 문제만 / 알림 항상',
+    '일시중지 / 재개',
+    '되돌리기                 직전 변경 취소</blockquote>',
+    '',
+    '<blockquote>주소는 https://·www·뒤 경로를 붙여도 알아서 정리됩니다.',
+    '여러 개는 줄바꿈이나 띄어쓰기로 한 번에 넣으세요.</blockquote>',
+  ].join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 동작 — 점검 실행
+// ═══════════════════════════════════════════════════════════════════
+function dispatchWorkflow_(reason) {
+  var repo = prop_('GITHUB_REPO');
+  var token = prop_('GITHUB_TOKEN');
+  var file = prop_('WORKFLOW_FILE', 'check.yml');
+  var ref = prop_('GIT_REF', 'main');
+  if (!repo || !token) throw new Error('GITHUB_REPO / GITHUB_TOKEN 속성이 없습니다');
+
+  var url = 'https://api.github.com/repos/' + repo + '/actions/workflows/' +
+    encodeURIComponent(file) + '/dispatches';
+  var res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    payload: JSON.stringify({ ref: ref, inputs: { mode: reason || 'manual' } }),
+    muteHttpExceptions: true,
+  });
+  var code = res.getResponseCode();
+  if (code !== 204) throw new Error('GitHub 응답 ' + code + ' ' + res.getContentText().slice(0, 200));
+
+  setProp_('LAST_DISPATCH_AT', nowKst_());
+  setProp_('RUN_STATE', '실행중');
+  setProp_('LAST_ERROR', '-');
+  armWatchdog_();
+  sysWrite_();
+}
+
+/** 15분 뒤에도 결과가 안 오면 경고 */
+function armWatchdog_() {
+  clearWatchdog_();
+  ScriptApp.newTrigger('watchdog').timeBased().after(WATCHDOG_MIN * 60 * 1000).create();
+}
+
+function clearWatchdog_() {
+  var ts = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < ts.length; i++) {
+    if (ts[i].getHandlerFunction() === 'watchdog') ScriptApp.deleteTrigger(ts[i]);
+  }
+}
+
+function watchdog() {
+  clearWatchdog_();
+  if (prop_('RUN_STATE', '대기') !== '실행중') return;
+  setProp_('RUN_STATE', '무응답');
+  setProp_('LAST_ERROR', nowKst_() + ' 점검 요청 후 ' + WATCHDOG_MIN + '분간 결과 없음');
+  sysWrite_();
+  notifyChannel_([
+    '⚠️ <b>점검 결과가 오지 않았습니다</b>',
+    '',
+    '<blockquote>' + esc_(prop_('LAST_DISPATCH_AT', '-')) + ' 에 점검을 요청했는데',
+    WATCHDOG_MIN + '분이 지나도 결과가 도착하지 않았습니다.',
+    'VPN 연결 실패이거나 GitHub 실행이 막혔을 수 있습니다.</blockquote>',
+  ].join('\n'), { inline_keyboard: [[{ text: '🔄 다시 점검', callback_data: 'run' }]] });
+}
+
+/** 매시간 실행 — 설정된 시각이면 점검 요청 */
+function hourlyTick() {
+  try {
+    checkTokenExpiry_();
+    var s = settings_();
+    if (s.paused) return;
+    // ★ 매시간 트리거는 정각에 딱 맞춰 오지 않는다(08:56, 10:02 처럼 어긋난다).
+    //   '지금 시각이 목록에 있나'만 보면 09시 점검이 통째로 건너뛰어진다.
+    //   그래서 최근 3시간 안에 지나간 예정 시각 중 아직 안 돌린 게 있으면 지금 돌린다.
+    var due = '';
+    for (var back = 0; back < 3; back++) {
+      var t = new Date(Date.now() - back * 3600000);
+      var hh = Number(Utilities.formatDate(t, 'Asia/Seoul', 'H'));
+      if (s.hours.indexOf(hh) === -1) continue;
+      var k = Utilities.formatDate(t, 'Asia/Seoul', 'yyyyMMddHH');
+      if (prop_('LAST_AUTO_KEY', '') === k) break;    // 이미 돌린 회차 → 그 이전은 볼 필요 없음
+      due = k;
+      break;
+    }
+    if (!due) return;
+    setProp_('LAST_AUTO_KEY', due);
+
+    dispatchWorkflow_('auto');
+  } catch (e) {
+    setProp_('LAST_ERROR', nowKst_() + ' ' + String(e && e.message || e));
+    sysWrite_();
+    notifyChannel_('⚠️ 자동 점검을 시작하지 못했습니다.\n\n<blockquote>' + esc_(String(e && e.message || e)) + '</blockquote>');
+  }
+}
+
+function checkTokenExpiry_() {
+  var d = prop_('GITHUB_TOKEN_EXPIRES', '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return;
+  var left = Math.floor((new Date(d + 'T00:00:00+09:00') - new Date()) / 86400000);
+  if (left > 30 || left < -3) return;
+  if (prop_('TOKEN_WARN_KEY', '') === d + ':' + left) return;
+  setProp_('TOKEN_WARN_KEY', d + ':' + left);
+  notifyChannel_('🔑 <b>GitHub 토큰 만료 안내</b>\n\n<blockquote>만료까지 ' + left + '일 남았습니다 (' + esc_(d) + ').\n만료되면 자동 점검이 멈춥니다. 운영자에게 알려주세요.</blockquote>');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 동작 — 도메인·업체 편집
+// ═══════════════════════════════════════════════════════════════════
+/** 업체 이름 규칙 — 한 곳에서만 판단한다(추가 경로마다 달라지면 구멍이 생긴다) */
+function validCompanyName_(name) {
+  var n = String(name === null || name === undefined ? '' : name).trim();
+  if (!n) throw new Error('업체 이름을 적어주세요.');
+  if (n.length > 20) throw new Error('업체 이름은 20자 이내로 해주세요.');
+  if (/[<>]/.test(n)) throw new Error('업체 이름에 < > 는 쓸 수 없습니다.');
+  if (/^[=+\-@]/.test(n)) throw new Error('업체 이름은 = + - @ 로 시작할 수 없습니다.');
+  return n;
+}
+
+function opAddDomains_(companyName, rawList, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var ci = findCompany_(model, companyName);
+    if (ci === -1) {
+      var newName = validCompanyName_(companyName);
+      if (model.length >= MAX_COMPANIES) throw new Error('업체는 최대 ' + MAX_COMPANIES + '곳까지 등록할 수 있습니다.');
+      model.push({ name: newName, domains: [] });
+      ci = model.length - 1;
+    }
+    var added = [], dup = [], bad = [], moved = [];
+    for (var i = 0; i < rawList.length; i++) {
+      var d = normalizeDomain_(rawList[i]);
+      if (!d) { bad.push(String(rawList[i])); continue; }
+      if (model[ci].domains.indexOf(d) !== -1) { dup.push(d); continue; }
+      var other = findDomain_(model, d);
+      if (other.length) moved.push(d + ' (〔' + model[other[0].ci].name + '〕에도 있음)');
+      if (model[ci].domains.length >= MAX_DOMAINS_PER_CO) throw new Error('한 업체에 최대 ' + MAX_DOMAINS_PER_CO + '개까지입니다.');
+      model[ci].domains.push(d);
+      added.push(d);
+    }
+    if (added.length) {
+      snapshot_('추가');
+      saveModel_(model);
+      log_(actor, '도메인 추가', '〔' + model[ci].name + '〕 ' + added.join(', '));
+      sysWrite_();
+    }
+    return { company: model[ci].name, added: added, dup: dup, bad: bad, moved: moved };
+  });
+}
+
+function opRemoveDomain_(domain, companyName, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var hits = findDomain_(model, domain);
+    if (!hits.length) throw new Error('등록되지 않은 주소입니다: ' + domain);
+    if (companyName) {
+      hits = hits.filter(function (h) { return model[h.ci].name.trim().toLowerCase() === String(companyName).trim().toLowerCase(); });
+      if (!hits.length) throw new Error('〔' + companyName + '〕에는 그 주소가 없습니다.');
+    }
+    if (hits.length > 1) {
+      var names = hits.map(function (h) { return model[h.ci].name; });
+      throw new Error('여러 업체에 있습니다(' + names.join(', ') + '). 업체를 지정해 주세요: 삭제 ' + domain + ' ' + names[0]);
+    }
+    snapshot_('삭제');
+    var co = model[hits[0].ci];
+    var removed = co.domains.splice(hits[0].di, 1)[0];
+    saveModel_(model);
+    log_(actor, '도메인 삭제', '〔' + co.name + '〕 ' + removed);
+    sysWrite_();
+    return { company: co.name, domain: removed };
+  });
+}
+
+function opReplaceDomain_(oldD, newD, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var hits = findDomain_(model, oldD);
+    if (!hits.length) throw new Error('등록되지 않은 주소입니다: ' + oldD);
+    var nd = normalizeDomain_(newD);
+    if (!nd) throw new Error('새 주소가 올바르지 않습니다: ' + newD);
+    snapshot_('변경');
+    var co = model[hits[0].ci];
+    var prev = co.domains[hits[0].di];
+    if (co.domains.indexOf(nd) !== -1 && co.domains.indexOf(nd) !== hits[0].di) {
+      co.domains.splice(hits[0].di, 1);
+    } else {
+      co.domains[hits[0].di] = nd;
+    }
+    saveModel_(model);
+    log_(actor, '주소 변경', '〔' + co.name + '〕 ' + prev + ' → ' + nd);
+    sysWrite_();
+    return { company: co.name, from: prev, to: nd };
+  });
+}
+
+function opMoveDomain_(domain, toCompany, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var hits = findDomain_(model, domain);
+    if (!hits.length) throw new Error('등록되지 않은 주소입니다: ' + domain);
+    var ti = findCompany_(model, toCompany);
+    if (ti === -1) throw new Error('그런 업체가 없습니다: ' + toCompany);
+    if (ti === hits[0].ci) throw new Error('이미 〔' + toCompany + '〕에 있습니다.');
+    snapshot_('이동');
+    var from = model[hits[0].ci];
+    var d = from.domains.splice(hits[0].di, 1)[0];
+    if (model[ti].domains.indexOf(d) === -1) model[ti].domains.push(d);
+    saveModel_(model);
+    log_(actor, '업체 이동', d + ' : 〔' + from.name + '〕 → 〔' + model[ti].name + '〕');
+    sysWrite_();
+    return { domain: d, from: from.name, to: model[ti].name };
+  });
+}
+
+function opAddCompany_(name, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var n = validCompanyName_(name);
+    if (findCompany_(model, n) !== -1) throw new Error('이미 있는 업체입니다: ' + n);
+    if (model.length >= MAX_COMPANIES) throw new Error('업체는 최대 ' + MAX_COMPANIES + '곳까지입니다.');
+    snapshot_('업체추가');
+    model.push({ name: n, domains: [] });
+    saveModel_(model);
+    log_(actor, '업체 추가', n);
+    sysWrite_();
+    return n;
+  });
+}
+
+function opRemoveCompany_(name, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var ci = findCompany_(model, name);
+    if (ci === -1) throw new Error('그런 업체가 없습니다: ' + name);
+    snapshot_('업체삭제');
+    var co = model.splice(ci, 1)[0];
+    saveModel_(model);
+    log_(actor, '업체 삭제', co.name + ' (도메인 ' + co.domains.length + '개 함께 삭제)');
+    sysWrite_();
+    return co;
+  });
+}
+
+function opRenameCompany_(oldName, newName, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var ci = findCompany_(model, oldName);
+    if (ci === -1) throw new Error('그런 업체가 없습니다: ' + oldName);
+    var n = validCompanyName_(newName);
+    if (findCompany_(model, n) !== -1) throw new Error('이미 있는 이름입니다: ' + n);
+    snapshot_('이름변경');
+    var prev = model[ci].name;
+    model[ci].name = n;
+    saveModel_(model);
+    log_(actor, '업체 이름변경', prev + ' → ' + n);
+    sysWrite_();
+    return { from: prev, to: n };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 텔레그램 — 글 명령 처리
+// ═══════════════════════════════════════════════════════════════════
+function handleTextCommand_(chatId, text, actor) {
+  var t = String(text || '').trim();
+  var lower = t.toLowerCase();
+
+  // 진행 중인 대화 상태가 있으면 그쪽이 우선
+  var st = getState_(chatId);
+  if (st && !/^(취소|cancel|\/cancel)$/i.test(t)) {
+    return handleStateInput_(chatId, st, t, actor);
+  }
+  if (/^(취소|cancel|\/cancel)$/i.test(t)) {
+    clearState_(chatId);
+    return tgSend_(chatId, '취소했습니다.', kbMain_());
+  }
+
+  if (/^(메뉴|menu|\/menu|시작|\/start)$/i.test(t)) return tgSend_(chatId, menuText_(), kbMain_());
+  if (/^(도움말|help|\/help|사용법)$/i.test(t)) return tgSend_(chatId, helpText_(), kbBack_());
+  if (/^(목록|list|\/list)$/i.test(t)) return tgSend_(chatId, listText_(), kbBack_());
+  if (/^(설정|config)$/i.test(t)) return tgSend_(chatId, settingsText_(), kbSettings_());
+
+  if (/^(점검|\/check|지금점검)$/i.test(t)) {
+    try {
+      dispatchWorkflow_('manual');
+      return tgSend_(chatId, '🌐 점검을 시작합니다.\n\n<blockquote>1~3분 뒤 결과를 보내드릴게요.</blockquote>');
+    } catch (e) {
+      return tgSend_(chatId, '❌ 실행 요청 실패\n\n<blockquote>' + esc_(String(e.message || e)) + '</blockquote>');
+    }
+  }
+
+  if (/^(상태|결과)$/i.test(t)) {
+    var last = prop_('LAST_REPORT', '');
+    if (!last) return tgSend_(chatId, '아직 점검 기록이 없습니다.', kbMain_());
+    return tgSend_(chatId, last, kbMain_());
+  }
+
+  if (/^되돌리기$/i.test(t)) return askUndo_(chatId);
+
+  if (/^일시중지$/i.test(t)) { setProp_('PAUSED', 'yes'); sysWrite_(); log_(actor, '설정', '자동 점검 일시중지'); return tgSend_(chatId, '⏸ 자동 점검을 멈췄습니다.\n\n<blockquote>수동 점검은 계속 됩니다. 다시 켜려면 [재개]</blockquote>', kbSettings_()); }
+  if (/^재개$/i.test(t)) { setProp_('PAUSED', 'no'); sysWrite_(); log_(actor, '설정', '자동 점검 재개'); return tgSend_(chatId, '▶️ 자동 점검을 다시 켰습니다.', kbSettings_()); }
+
+  var m;
+  if ((m = /^알림\s+(항상|전체|문제만|문제)$/.exec(t))) {
+    var lv = /문제/.test(m[1]) ? 'problem' : 'all';
+    setProp_('NOTIFY_LEVEL', lv); sysWrite_(); log_(actor, '설정', '알림 수준 ' + (lv === 'all' ? '항상' : '문제만'));
+    return tgSend_(chatId, '🔔 알림 수준을 <b>' + (lv === 'all' ? '항상 받기' : '문제 있을 때만') + '</b>으로 바꿨습니다.', kbSettings_());
+  }
+
+  if ((m = /^점검시각\s+(.+)$/.exec(t))) return applyHours_(chatId, m[1], actor);
+
+  if ((m = /^추가\s+(\S+)\s+([\s\S]+)$/.exec(t))) {
+    return doAdd_(chatId, m[1], m[2].split(/[\s,]+/), actor);
+  }
+  if ((m = /^삭제\s+(\S+)(?:\s+(\S+))?$/.exec(t))) {
+    try {
+      var r = opRemoveDomain_(m[1], m[2] || '', actor);
+      return tgSend_(chatId, '✅ 삭제됨 — 〔' + esc_(r.company) + '〕 ' + esc_(r.domain) + '\n\n<blockquote>잘못 지웠으면 [되돌리기]</blockquote>', kbMain_());
+    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+  if ((m = /^변경\s+(\S+)\s+(\S+)$/.exec(t))) {
+    try {
+      var rc = opReplaceDomain_(m[1], m[2], actor);
+      return tgSend_(chatId, '✅ 〔' + esc_(rc.company) + '〕 ' + esc_(rc.from) + ' → ' + esc_(rc.to), kbMain_());
+    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+  if ((m = /^이동\s+(\S+)\s+(\S+)$/.exec(t))) {
+    try {
+      var rm = opMoveDomain_(m[1], m[2], actor);
+      return tgSend_(chatId, '✅ ' + esc_(rm.domain) + ' : 〔' + esc_(rm.from) + '〕 → 〔' + esc_(rm.to) + '〕', kbMain_());
+    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+  if ((m = /^업체추가\s+(.+)$/.exec(t))) {
+    try { return tgSend_(chatId, '✅ 업체 〔' + esc_(opAddCompany_(m[1], actor)) + '〕 추가됨', kbMain_()); }
+    catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+  if ((m = /^업체삭제\s+(.+)$/.exec(t))) {
+    var model0 = loadModel_();
+    var ci0 = findCompany_(model0, m[1]);
+    if (ci0 === -1) return tgSend_(chatId, '❌ 그런 업체가 없습니다: ' + esc_(m[1]), kbMain_());
+    setState_(chatId, { op: 'codel-confirm', name: model0[ci0].name, by: actor, at: Date.now(), mid: 0 });
+    return tgSend_(chatId,
+      '🗑 업체 〔' + esc_(model0[ci0].name) + '〕 를 도메인 ' + model0[ci0].domains.length + '개와 함께 삭제할까요?',
+      { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
+  }
+  if ((m = /^이름변경\s+(\S+)\s+(.+)$/.exec(t))) {
+    try {
+      var rr = opRenameCompany_(m[1], m[2], actor);
+      return tgSend_(chatId, '✅ 업체 이름 변경 — 〔' + esc_(rr.from) + '〕 → 〔' + esc_(rr.to) + '〕', kbMain_());
+    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+
+  // 주소만 덜렁 보낸 경우 → 어디에 추가할지 물어봄 (여러 줄로 붙여넣은 경우도 포함)
+  var pieces = t.split(/[\s,]+/).filter(function (x) { return !!x; });
+  var picked = [], allDomains = pieces.length > 0;
+  for (var pi = 0; pi < pieces.length; pi++) {
+    var nd = normalizeDomain_(pieces[pi]);
+    if (!nd) { allDomains = false; break; }
+    picked.push(nd);
+  }
+  if (allDomains) {
+    var model1 = loadModel_();
+    if (!model1.length) {
+      setState_(chatId, { op: 'add-pick-newco', domains: pieces, by: actor, at: Date.now() });
+      return tgSend_(chatId, '🏢 등록된 업체가 없습니다. 이 주소를 넣을 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳   (취소: 취소)</blockquote>');
+    }
+    setState_(chatId, { op: 'add-pick-company', domains: pieces, by: actor, at: Date.now() });
+    var head1 = picked.length === 1
+      ? '➕ <b>' + esc_(picked[0]) + '</b> 을(를) 어느 업체에 추가할까요?'
+      : '➕ 주소 ' + picked.length + '개를 어느 업체에 추가할까요?\n\n<blockquote>' +
+        picked.slice(0, 10).map(esc_).join('\n') +
+        (picked.length > 10 ? '\n외 ' + (picked.length - 10) + '개' : '') + '</blockquote>';
+    return tgSend_(chatId, head1, kbCompanies_(model1, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
+  }
+
+  return null;   // 모르는 말은 조용히 무시(채널에 잡담이 오갈 수 있으므로)
+}
+
+function kbSettings_() {
+  var s = settings_();
+  return { inline_keyboard: [
+    [{ text: '🕘 점검 시각 바꾸기', callback_data: 'cfgh' }],
+    [{ text: s.notify === 'all' ? '🔔 알림: 항상 → 문제만' : '🔕 알림: 문제만 → 항상', callback_data: 'cfgn' }],
+    [{ text: s.paused ? '▶️ 자동 점검 재개' : '⏸ 자동 점검 일시중지', callback_data: 'cfgp' }],
+    [{ text: '◀️ 메뉴로', callback_data: 'm' }],
+  ] };
+}
+
+function applyHours_(chatId, raw, actor) {
+  // ★ 빈 조각을 먼저 걸러야 한다. Number('') 는 0 이라서 '9시 21시' 가 '0,9,21' 이 되어
+  //   부탁하지 않은 자정 점검이 매일 돌게 된다.
+  var hours = String(raw).split(/[^0-9]+/)
+    .filter(function (x) { return /^\d+$/.test(x); })
+    .map(function (x) { return Number(x); })
+    .filter(function (x) { return x >= 0 && x <= 23; });
+  // 중복 제거 + 정렬
+  var uniq = [];
+  for (var i = 0; i < hours.length; i++) if (uniq.indexOf(hours[i]) === -1) uniq.push(hours[i]);
+  uniq.sort(function (a, b) { return a - b; });
+
+  if (!uniq.length) return tgSend_(chatId, '❌ 시각을 못 알아들었습니다.\n\n<blockquote>예) 점검시각 9 21</blockquote>', kbSettings_());
+  if (uniq.length > 6) return tgSend_(chatId, '❌ 하루 최대 6번까지만 설정할 수 있습니다.', kbSettings_());
+
+  setProp_('CHECK_HOURS', uniq.join(','));
+  clearState_(chatId);
+  sysWrite_();
+  log_(actor, '설정', '점검 시각 ' + uniq.join(',') + '시');
+  return tgSend_(chatId, '🕘 점검 시각을 <b>매일 ' +
+    uniq.map(function (h) { return ('0' + h).slice(-2) + '시'; }).join(' · ') + '</b> (한국시간)로 바꿨습니다.', kbSettings_());
+}
+
+function doAdd_(chatId, company, rawList, actor) {
+  try {
+    var r = opAddDomains_(company, rawList, actor);
+    var lines = ['✅ 〔' + esc_(r.company) + '〕 ' + r.added.length + '개 추가'];
+    for (var i = 0; i < r.added.length; i++) lines.push('+ ' + esc_(r.added[i]));
+    for (var j = 0; j < r.dup.length; j++) lines.push('⏭ ' + esc_(r.dup[j]) + ' (이미 있음)');
+    for (var k = 0; k < r.bad.length; k++) lines.push('⚠️ ' + esc_(r.bad[k]) + ' (주소 형식이 아님)');
+    for (var n = 0; n < r.moved.length; n++) lines.push('ℹ️ ' + esc_(r.moved[n]));
+    clearState_(chatId);
+    var kb = r.added.length
+      ? { inline_keyboard: [[{ text: '🔍 지금 점검', callback_data: 'run' }, { text: '◀️ 메뉴로', callback_data: 'm' }]] }
+      : kbMain_();
+    return tgSend_(chatId, '<blockquote>' + lines.join('\n') + '</blockquote>', kb);
+  } catch (e) {
+    clearState_(chatId);
+    return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_());
+  }
+}
+
+function askUndo_(chatId) {
+  var label = prop_('UNDO_LABEL', '');
+  var at = prop_('UNDO_AT', '');
+  if (!label) return tgSend_(chatId, '되돌릴 내용이 없습니다.', kbMain_());
+  return tgSend_(chatId, '↩️ 직전 <b>' + esc_(label) + '</b> 작업(' + esc_(at) + ')을 되돌릴까요?',
+    { inline_keyboard: [[{ text: '예, 되돌리기', callback_data: 'undook' }, { text: '아니오', callback_data: 'x' }]] });
+}
+
+// 대화 중 입력 받기
+function handleStateInput_(chatId, st, text, actor) {
+  if (st.op === 'add-input') {
+    var list = String(text).split(/[\s,\n]+/).filter(Boolean);
+    return doAdd_(chatId, st.company, list, actor);
+  }
+  if (st.op === 'add-newco') {
+    setState_(chatId, { op: 'add-input', company: String(text).trim(), by: actor, at: Date.now() });
+    return tgSend_(chatId, '➕ 〔' + esc_(String(text).trim()) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에. (취소: 취소)</blockquote>');
+  }
+  if (st.op === 'add-pick-newco') {
+    clearState_(chatId);
+    return doAdd_(chatId, String(text).trim(), st.domains, actor);
+  }
+  if (st.op === 'add-pick-company') {
+    // 버튼 대신 업체 이름을 글로 적은 경우 — 예전엔 여기서 조용히 사라졌다
+    clearState_(chatId);
+    return doAdd_(chatId, String(text).trim(), st.domains, actor);
+  }
+  if (st.op === 'co-add') {
+    var newName = String(text).trim();
+    try {
+      var made = opAddCompany_(newName, actor);
+      if (st.thenAdd) {
+        // 업체가 하나도 없을 때 [➕ 도메인 추가]로 들어온 경우 — 만들고 끝내면 안 되고 주소까지 이어받아야 한다
+        setState_(chatId, { op: 'add-input', company: made, by: actor, at: Date.now() });
+        return tgSend_(chatId, '✅ 업체 〔' + esc_(made) + '〕 추가됨\n\n➕ 이제 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에. (취소: 취소)</blockquote>');
+      }
+      clearState_(chatId);
+      return tgSend_(chatId, '✅ 업체 〔' + esc_(made) + '〕 추가됨', kbMain_());
+    } catch (e) {
+      clearState_(chatId);
+      return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_());
+    }
+  }
+  if (st.op === 'co-rename') {
+    clearState_(chatId);
+    try {
+      var rr = opRenameCompany_(st.name, text, actor);
+      return tgSend_(chatId, '✅ 〔' + esc_(rr.from) + '〕 → 〔' + esc_(rr.to) + '〕', kbMain_());
+    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+  if (st.op === 'cfg-hours') return applyHours_(chatId, text, actor);
+
+  // 확인(예/아니오)을 기다리는 중에 다른 말을 쓴 경우 — 예전엔 아무 말 없이 절차가 사라졌다
+  if (st.op === 'del-confirm' || st.op === 'codel-confirm') {
+    clearState_(chatId);
+    return tgSend_(chatId, '확인을 기다리다 취소했습니다.\n\n<blockquote>버튼을 누르지 않고 다른 말을 쓰면 취소됩니다.\n다시 하시려면 [🗑 도메인 삭제]</blockquote>', kbMain_());
+  }
+  clearState_(chatId);
+  return tgSend_(chatId, '진행 중이던 작업을 취소했습니다.\n\n<blockquote>다시 시작하려면 아래 버튼을 눌러주세요.</blockquote>', kbMain_());
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 텔레그램 — 버튼 처리
+// ═══════════════════════════════════════════════════════════════════
+function handleCallback_(cb) {
+  var chatId = String(cb.message.chat.id);
+  var mid = cb.message.message_id;
+  var data = String(cb.data || '');
+  var actor = actorOf_(null, cb.from);
+
+  if (!canControl_(chatId)) { tgAnswer_(cb.id, '권한이 없습니다'); return; }
+  tgAnswer_(cb.id, '');
+
+  var model = loadModel_();
+  var parts = data.split(':');
+  var head = parts[0];
+
+  // 다른 담당자가 절차를 진행 중이면 새 절차 시작을 막는다(입력이 섞이는 사고 방지)
+  if (['add', 'del', 'coa', 'cor', 'cod', 'cfgh', 'dx', 'codp', 'corp'].indexOf(head) !== -1) {
+    var busy = busyBy_(chatId, actor);
+    if (busy) return tgEdit_(chatId, mid, busy, kbMain_());
+  }
+
+  if (head === 'm')    return tgEdit_(chatId, mid, menuText_(), kbMain_());
+  if (head === 'x')    { clearState_(chatId); return tgEdit_(chatId, mid, '취소했습니다.', kbMain_()); }
+  if (head === 'help') return tgEdit_(chatId, mid, helpText_(), kbBack_());
+  if (head === 'list') return tgEdit_(chatId, mid, listText_(), kbBack_());
+  if (head === 'cfg')  return tgEdit_(chatId, mid, settingsText_(), kbSettings_());
+
+  if (head === 'run') {
+    try {
+      dispatchWorkflow_('manual');
+      return tgEdit_(chatId, mid, '🌐 점검을 시작합니다.\n\n<blockquote>1~3분 뒤 결과를 보내드릴게요.</blockquote>', kbBack_());
+    } catch (e) {
+      return tgEdit_(chatId, mid, '❌ 실행 요청 실패\n\n<blockquote>' + esc_(String(e.message || e)) + '</blockquote>', kbBack_());
+    }
+  }
+
+  if (head === 'add') {
+    if (!model.length) {
+      // thenAdd: 업체를 만든 뒤 곧바로 주소 입력으로 이어간다(여기서 끊기면 셋업 첫 단계에서 막힌다)
+      setState_(chatId, { op: 'co-add', thenAdd: true, by: actor, at: Date.now() });
+      return tgEdit_(chatId, mid, '🏢 등록된 업체가 없습니다. 먼저 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳\n업체를 만들면 바로 주소를 물어봅니다. (취소: 취소)</blockquote>');
+    }
+    return tgEdit_(chatId, mid, '➕ 어느 업체에 추가할까요?',
+      kbCompanies_(model, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
+  }
+  if (head === 'a') {
+    var ci = Number(parts[1]);
+    if (!model[ci]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    var st0 = getState_(chatId);
+    if (st0 && st0.op === 'add-pick-company') {
+      clearState_(chatId);
+      return doAdd_(chatId, model[ci].name, st0.domains, actor);
+    }
+    setState_(chatId, { op: 'add-input', company: model[ci].name, by: actor, at: Date.now() });
+    return tgEdit_(chatId, mid, '➕ 〔' + esc_(model[ci].name) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에.\nhttps·www·뒤 경로는 알아서 정리됩니다. (취소: 취소)</blockquote>');
+  }
+  if (head === 'an') {
+    var stn = getState_(chatId);
+    setState_(chatId, (stn && stn.op === 'add-pick-company')
+      ? { op: 'add-pick-newco', domains: stn.domains, by: actor, at: Date.now() }
+      : { op: 'add-newco', by: actor, at: Date.now() });
+    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳   (취소: 취소)</blockquote>');
+  }
+
+  if (head === 'del') {
+    if (!model.length) return tgEdit_(chatId, mid, '등록된 도메인이 없습니다.', kbMain_());
+    return tgEdit_(chatId, mid, '🗑 어느 업체의 주소를 지울까요?', kbCompanies_(model, 'd'));
+  }
+  if (head === 'd') {
+    var di = Number(parts[1]);
+    if (!model[di]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!model[di].domains.length) return tgEdit_(chatId, mid, '〔' + esc_(model[di].name) + '〕 에 주소가 없습니다.', kbMain_());
+    var rows = [];
+    for (var i = 0; i < model[di].domains.length; i++) {
+      rows.push([{ text: '🗑 ' + model[di].domains[i], callback_data: 'dx:' + di + ':' + i }]);
+      if (rows.length >= 40) break;
+    }
+    rows.push([{ text: '◀️ 메뉴로', callback_data: 'm' }]);
+    var over = model[di].domains.length - rows.length + 1;
+    var note = over > 0 ? '\n\n<blockquote>주소가 많아 앞 40개만 보여드립니다.\n나머지는 <b>삭제 example.com</b> 처럼 주소를 직접 적어주세요.</blockquote>' : '';
+    return tgEdit_(chatId, mid, '🗑 〔' + esc_(model[di].name) + '〕 에서 지울 주소를 고르세요.' + note, { inline_keyboard: rows });
+  }
+  if (head === 'dx') {
+    var c1 = Number(parts[1]), d1 = Number(parts[2]);
+    if (!model[c1] || !model[c1].domains[d1]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    setState_(chatId, { op: 'del-confirm', company: model[c1].name, domain: model[c1].domains[d1], by: actor, at: Date.now(), mid: mid });
+    return tgEdit_(chatId, mid, '🗑 〔' + esc_(model[c1].name) + '〕 <b>' + esc_(model[c1].domains[d1]) + '</b> 을(를) 삭제할까요?',
+      { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'dok' }, { text: '아니오', callback_data: 'x' }]] });
+  }
+  if (head === 'dok') {
+    var std = getState_(chatId);
+    clearState_(chatId);
+    if (!std || std.op !== 'del-confirm') return tgEdit_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
+    // 오래된 확인 버튼(위로 스크롤해서 누른 것)이 엉뚱한 대상을 지우지 않게 한다
+    if (std.mid && std.mid !== mid) return tgEdit_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
+    try {
+      var rd = opRemoveDomain_(std.domain, std.company, actor);
+      return tgEdit_(chatId, mid, '✅ 삭제됨 — 〔' + esc_(rd.company) + '〕 ' + esc_(rd.domain) + '\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+    } catch (e) { return tgEdit_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+
+  if (head === 'co') {
+    return tgEdit_(chatId, mid, '🏢 <b>업체 관리</b>\n\n<blockquote>' + (model.length ? model.map(function (c) { return esc_(c.name) + ' (' + c.domains.length + ')'; }).join('\n') : '등록된 업체가 없습니다') + '</blockquote>',
+      { inline_keyboard: [
+        [{ text: '➕ 업체 추가', callback_data: 'coa' }],
+        [{ text: '✏️ 이름 바꾸기', callback_data: 'cor' }, { text: '🗑 업체 삭제', callback_data: 'cod' }],
+        [{ text: '◀️ 메뉴로', callback_data: 'm' }],
+      ] });
+  }
+  if (head === 'coa') {
+    setState_(chatId, { op: 'co-add', by: actor, at: Date.now() });
+    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳   (취소: 취소)</blockquote>');
+  }
+  if (head === 'cor') {
+    if (!model.length) return tgEdit_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());
+    return tgEdit_(chatId, mid, '✏️ 이름을 바꿀 업체를 고르세요.', kbCompanies_(model, 'corp'));
+  }
+  if (head === 'corp') {
+    var ri = Number(parts[1]);
+    if (!model[ri]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    setState_(chatId, { op: 'co-rename', name: model[ri].name, by: actor, at: Date.now() });
+    return tgEdit_(chatId, mid, '✏️ 〔' + esc_(model[ri].name) + '〕 의 새 이름을 보내주세요.\n\n<blockquote>(취소: 취소)</blockquote>');
+  }
+  if (head === 'cod') {
+    if (!model.length) return tgEdit_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());
+    return tgEdit_(chatId, mid, '🗑 삭제할 업체를 고르세요.\n\n<blockquote>그 업체의 도메인이 함께 지워집니다.</blockquote>', kbCompanies_(model, 'codp'));
+  }
+  if (head === 'codp') {
+    var xi = Number(parts[1]);
+    if (!model[xi]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    setState_(chatId, { op: 'codel-confirm', name: model[xi].name, by: actor, at: Date.now(), mid: mid });
+    return tgEdit_(chatId, mid, '🗑 업체 〔' + esc_(model[xi].name) + '〕 를 도메인 ' + model[xi].domains.length + '개와 함께 삭제할까요?',
+      { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
+  }
+  if (head === 'codelok') {
+    var stc = getState_(chatId);
+    clearState_(chatId);
+    if (!stc || stc.op !== 'codel-confirm') return tgEdit_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
+    if (stc.mid && stc.mid !== mid) return tgEdit_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
+    try {
+      var co = opRemoveCompany_(stc.name, actor);
+      return tgEdit_(chatId, mid, '✅ 업체 〔' + esc_(co.name) + '〕 삭제됨 (도메인 ' + co.domains.length + '개)\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+    } catch (e) { return tgEdit_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+
+  if (head === 'cfgh') {
+    setState_(chatId, { op: 'cfg-hours', by: actor, at: Date.now() });
+    return tgEdit_(chatId, mid, '🕘 점검할 시각을 한국시간 기준 숫자로 보내주세요.\n\n<blockquote>예) 9 21   → 매일 09시·21시\n예) 7 13 19 → 하루 세 번\n(취소: 취소)</blockquote>');
+  }
+  if (head === 'cfgn') {
+    var s2 = settings_();
+    var nv = s2.notify === 'all' ? 'problem' : 'all';
+    setProp_('NOTIFY_LEVEL', nv); sysWrite_(); log_(actor, '설정', '알림 수준 ' + (nv === 'all' ? '항상' : '문제만'));
+    return tgEdit_(chatId, mid, settingsText_(), kbSettings_());
+  }
+  if (head === 'cfgp') {
+    var s3 = settings_();
+    setProp_('PAUSED', s3.paused ? 'no' : 'yes'); sysWrite_();
+    log_(actor, '설정', s3.paused ? '자동 점검 재개' : '자동 점검 일시중지');
+    return tgEdit_(chatId, mid, settingsText_(), kbSettings_());
+  }
+
+  if (head === 'undo') {
+    if (!prop_('UNDO_LABEL', '')) return tgEdit_(chatId, mid, '되돌릴 내용이 없습니다.', kbMain_());
+    return tgEdit_(chatId, mid, '↩️ 직전 <b>' + esc_(prop_('UNDO_LABEL', '변경')) + '</b> 작업(' + esc_(prop_('UNDO_AT', '-')) + ')을 되돌릴까요?',
+      { inline_keyboard: [[{ text: '예, 되돌리기', callback_data: 'undook' }, { text: '아니오', callback_data: 'x' }]] });
+  }
+  if (head === 'undook') {
+    try {
+      var lbl = withLock_(function () { return undo_(); });
+      log_(actor, '되돌리기', lbl + ' 작업을 되돌림');
+      sysWrite_();
+      return tgEdit_(chatId, mid, '↩️ 되돌렸습니다 (' + esc_(lbl) + ').', kbMain_());
+    } catch (e) { return tgEdit_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+
+  return tgEdit_(chatId, mid, menuText_(), kbMain_());
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 텔레그램 진입점
+// ═══════════════════════════════════════════════════════════════════
+function handleTelegram_(e) {
+  var secret = prop_('WEBHOOK_SECRET', '');
+  if (secret) {
+    var got = (e.parameter && e.parameter.s) || '';
+    if (got !== secret) return json_({ ok: true, ignored: 'bad secret' });
+  }
+
+  var update = {};
+  try { update = JSON.parse((e.postData && e.postData.contents) || '{}'); } catch (ignore) {}
+
+  if (seenUpdate_(update.update_id)) return json_({ ok: true, ignored: 'duplicate' });
+
+  if (update.callback_query) {
+    try { handleCallback_(update.callback_query); }
+    catch (err) { try { tgAnswer_(update.callback_query.id, '오류: ' + String(err.message || err)); } catch (i2) {} }
+    return json_({ ok: true });
+  }
+
+  // 수정된 글(edited_*)은 명령으로 처리하지 않는다 — 옛 글을 고쳐서 다시 실행되는 사고 방지
+  var msg = update.message || update.channel_post;
+  if (!msg || !msg.text) return json_({ ok: true, ignored: 'no text' });
+
+  var chatId = String((msg.chat && msg.chat.id) || '');
+  var text = String(msg.text || '').trim();
+  var actor = actorOf_(msg, null);
+
+  if (!canControl_(chatId)) {
+    // 허용되지 않은 곳: 조용히 무시. (설정이 비어 있으면 여기로 온다)
+    return json_({ ok: true, ignored: 'not allowed' });
+  }
+
+  try {
+    handleTextCommand_(chatId, text, actor);
+  } catch (err) {
+    tgSend_(chatId, '❌ 오류\n\n<blockquote>' + esc_(String(err.message || err)) + '</blockquote>', kbMain_());
+  }
+  return json_({ ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 웹앱 진입점 (GitHub ↔ 브리지)
+// ═══════════════════════════════════════════════════════════════════
+function authorized_(e) {
+  var token = prop_('ACCESS_TOKEN');
+  if (!token) return false;
+  return !!(e && e.parameter && e.parameter.token === token);
+}
+
+function doGet(e) {
+  try {
+    if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
+    var action = (e.parameter.action || 'read');
+    if (action === 'read') {
+      var sh = sheet_(SHEET_INPUT, true);
+      var lastRow = Math.max(1, sh.getLastRow());
+      var lastCol = Math.min(Math.max(1, sh.getLastColumn()), MAX_COMPANIES);
+      return json_({
+        ok: true,
+        values: sh.getRange(1, 1, lastRow, lastCol).getDisplayValues(),
+        settings: settings_(),
+      });
+    }
+    if (action === 'ping') return json_({ ok: true, pong: true });
+    return json_({ ok: false, error: 'unknown action: ' + action });
+  } catch (err) {
+    return json_({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
+function doPost(e) {
+  try {
+    var action = (e.parameter && e.parameter.action) || 'write';
+    if (action === 'tg') {
+      if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
+      return handleTelegram_(e);
+    }
+    if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
+    if (action === 'write') {
+      var body = JSON.parse((e.postData && e.postData.contents) || '{}');
+      writeResults_(body.rows || [], body.meta || {});
+      return json_({ ok: true, written: Math.max(0, (body.rows || []).length - 1) });
+    }
+    if (action === 'fail') {
+      var b2 = JSON.parse((e.postData && e.postData.contents) || '{}');
+      clearWatchdog_();
+      setProp_('RUN_STATE', '실패');
+      setProp_('LAST_ERROR', nowKst_() + ' ' + String(b2.error || '알 수 없는 오류'));
+      sysWrite_();
+      return json_({ ok: true });
+    }
+    return json_({ ok: false, error: 'unknown action: ' + action });
+  } catch (err) {
+    return json_({ ok: false, error: String(err && err.message || err) });
+  }
+}
+
+function writeResults_(rows, meta) {
+  clearWatchdog_();
+
+  // ★ 순서가 중요하다. 예전엔 속성 저장을 먼저 했는데, 리포트가 길면 그 줄에서 예외가 나
+  //   '결과' 탭이 아예 기록되지 않았다 — 하필 문제가 많은 날에만 조용히 실패했다.
+  //   그래서 시트 기록을 먼저 하고, 부가 정보 저장은 각각 실패해도 넘어가게 한다.
+  if (rows && rows.length && rows[0] && rows[0].length) {
+    var sh = sheet_(SHEET_RESULT, true);
+    var width = rows[0].length;
+    var norm = rows.map(function (r) {
+      var a = (r || []).slice(0, width);
+      while (a.length < width) a.push('');
+      return safeRow_(a);
+    });
+    sh.clear();
+    sh.getRange(1, 1, norm.length, width).setValues(norm);
+    sh.getRange(1, 1, 1, width).setFontWeight('bold').setBackground('#F1F3F4');
+    sh.setFrozenRows(1);
+    try { sh.autoResizeColumns(1, width); } catch (ignore) {}
+  }
+
+  // 형식이 잘못돼 점검조차 못 한 항목을 시트 아래에 덧붙인다(운영자가 바로 보게)
+  try {
+    if (meta.skipped && meta.skipped.length) {
+      var sh2 = sheet_(SHEET_RESULT, true);
+      var start = sh2.getLastRow() + 2;
+      var extra = [['⚠️ 점검하지 못한 항목 (주소 형식이 아님)', '', '', '', '', '', '', '']];
+      for (var i = 0; i < meta.skipped.length; i++) {
+        extra.push([String(meta.skipped[i]), '', '', '', '', '', '', '']);
+      }
+      sh2.getRange(start, 1, extra.length, 8).setValues(extra.map(safeRow_));
+    }
+  } catch (ignore1) {}
+
+  try { setProp_('RUN_STATE', '대기'); } catch (ignore2) {}
+  try { setProp_('LAST_RESULT_AT', meta.nowKst || nowKst_()); } catch (ignore3) {}
+  try { if (meta.summary) setProp_('LAST_RESULT_SUMMARY', String(meta.summary).slice(0, 200)); } catch (ignore4) {}
+  try { if (meta.report) setProp_('LAST_REPORT', trimReport_(meta.report, 7000)); } catch (ignore5) {}
+  try { setProp_('LAST_ERROR', '-'); } catch (ignore6) {}
+
+  sysWrite_();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 설치용 (편집기에서 직접 실행)
+// ═══════════════════════════════════════════════════════════════════
+function webhookUrl_() {
+  var url = prop_('WEBAPP_URL') || ScriptApp.getService().getUrl();
+  if (!url) throw new Error('웹앱 URL을 찾을 수 없습니다 → WEBAPP_URL 속성에 /exec URL을 넣어주세요');
+  if (url.indexOf('/exec') === -1) throw new Error('웹앱 URL은 /exec 로 끝나야 합니다(배포 → 배포 관리에서 확인): ' + url);
+  var u = url + '?token=' + encodeURIComponent(prop_('ACCESS_TOKEN')) + '&action=tg';
+  var secret = prop_('WEBHOOK_SECRET', '');
+  if (secret) u += '&s=' + encodeURIComponent(secret);
+  return u;
+}
+
+/** ★ 셋업 마지막에 한 번 실행 — 시트 탭 생성 + 스케줄 + 텔레그램 연결 */
+function setupAll() {
+  sheet_(SHEET_INPUT, true);
+  sheet_(SHEET_RESULT, true);
+  sheet_(SHEET_LOG, true);
+  sheet_(SHEET_SYS, true);
+  log_('시스템', '설치', 'setupAll 실행');
+  applySchedule_();
+  setupWebhook();
+  sysWrite_('설치 완료');
+  Logger.log('✅ 설치 완료 — 시트 탭·스케줄·텔레그램 연결이 끝났습니다.');
+}
+
+/** 매시간 트리거 하나만 둔다(시간대 설정 사고 방지 — 안에서 한국시간을 직접 계산) */
+function applySchedule_() {
+  var ts = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < ts.length; i++) {
+    if (ts[i].getHandlerFunction() === 'hourlyTick') ScriptApp.deleteTrigger(ts[i]);
+  }
+  ScriptApp.newTrigger('hourlyTick').timeBased().everyHours(1).create();
+  Logger.log('스케줄 설정 완료 — 매시간 확인, 점검 시각: ' + settings_().hours.join(','));
+}
+
+function setupWebhook() {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot) throw new Error('BOT_TOKEN 속성이 없습니다');
+  var payload = {
+    url: webhookUrl_(),
+    allowed_updates: ['message', 'channel_post', 'callback_query'],
+    drop_pending_updates: true,
+  };
+  var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/setWebhook', {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify(payload), muteHttpExceptions: true,
+  });
+  Logger.log('setWebhook → ' + res.getContentText());
+}
+
+function getWebhookInfo() {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot) throw new Error('BOT_TOKEN 속성이 없습니다');
+  var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/getWebhookInfo', { muteHttpExceptions: true });
+  Logger.log(res.getContentText().replace(/token=[^&"]+/g, 'token=***').replace(/s=[^&"]+/g, 's=***'));
+}
+
+function deleteWebhook() {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot) throw new Error('BOT_TOKEN 속성이 없습니다');
+  var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/deleteWebhook', { muteHttpExceptions: true });
+  Logger.log('deleteWebhook → ' + res.getContentText());
+}
+
+/** 시트가 제대로 읽히는지 확인 */
+function testRead() {
+  var model = loadModel_();
+  Logger.log('업체 ' + model.length + '곳 / 도메인 ' + totalDomains_(model) + '개');
+  Logger.log(JSON.stringify(model).slice(0, 800));
+}
+
+/** 채널 연결 확인 — 채널로 시험 메시지를 보낸다 */
+function testChannel() {
+  var ids = allowedChats_();
+  if (!ids.length) throw new Error('ALLOWED_CHAT_IDS 속성이 비어 있습니다');
+  tgSend_(ids[0], menuText_(), kbMain_());
+  Logger.log('시험 메시지를 보냈습니다 → ' + ids[0]);
+}

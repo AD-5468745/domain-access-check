@@ -1,0 +1,169 @@
+name: 접속점검 (한국 IP)
+
+# 정기 실행(cron)은 일부러 쓰지 않는다.
+#   · 점검 시각을 담당자가 텔레그램에서 바꿀 수 있어야 하는데, cron은 이 파일에 박혀 있어 불가능
+#   · GitHub은 저장소가 60일간 조용하면 정기 실행을 스스로 꺼버린다(조용히 멈추는 사고)
+#   · 무료 정기 실행은 혼잡할 때 수십 분 늦거나 건너뛴다
+# → 앱스스크립트(bridge.gs)가 매시간 확인해서 정해진 시각에 이 워크플로를 깨운다.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '실행 방식(기록용) — auto / manual'
+        required: false
+        default: 'manual'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: domain-access-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: 접속점검 실행
+    runs-on: ubuntu-latest
+    timeout-minutes: 30      # VPN 재시도 + 도메인 200개 최악의 경우까지 여유
+
+    steps:
+      - name: 코드 받기
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Node 20 준비
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 로직 검증(네트워크 불필요)
+        run: npm test
+
+      - name: OpenVPN 설치
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openvpn openvpn-systemd-resolved
+
+      - name: NordVPN 한국 서버 접속 (다중 서버 재시도)
+        env:
+          NORDVPN_USER: ${{ secrets.NORDVPN_USER }}
+          NORDVPN_PASS: ${{ secrets.NORDVPN_PASS }}
+        run: |
+          # ★ set -e 로 죽지 않게 한다. 서버 하나가 실패해도 다음 서버로 넘어가야 하고,
+          #   전부 실패해도 check.js 가 실행되어 '한국 IP 아님' 경고를 텔레그램으로 보내야 한다.
+          set +e
+          set -u
+
+          if [ -z "${NORDVPN_USER}" ] || [ -z "${NORDVPN_PASS}" ]; then
+            echo "::warning::NordVPN 자격증명이 없습니다 — 점검은 KR 검증 단계에서 중단됩니다"
+            exit 0
+          fi
+
+          umask 077
+          printf '%s\n%s\n' "$NORDVPN_USER" "$NORDVPN_PASS" > /tmp/nordauth.txt
+          chmod 600 /tmp/nordauth.txt
+
+          # 추천 한국 서버 목록(country_id 114 = 대한민국). 실패하면 전체 목록으로 대체.
+          HOSTS=$(curl -fsS --max-time 20 \
+            'https://api.nordvpn.com/v1/servers/recommendations?filters%5Bcountry_id%5D=114&filters%5Bservers_technologies%5D%5Bidentifier%5D=openvpn_udp&limit=6' \
+            | jq -r '.[].hostname' 2>/dev/null | tr '\n' ' ')
+          if [ -z "$(echo "${HOSTS:-}" | tr -d '[:space:]')" ]; then
+            HOSTS=$(curl -fsS --max-time 20 \
+              'https://api.nordvpn.com/v1/servers?filters%5Bcountry_id%5D=114&limit=200' \
+              | jq -r '.[].hostname' 2>/dev/null | sort -u | head -6 | tr '\n' ' ')
+          fi
+          if [ -z "$(echo "${HOSTS:-}" | tr -d '[:space:]')" ]; then
+            echo "::warning::NordVPN 서버 목록을 못 받았습니다"
+            exit 0
+          fi
+          echo "후보 서버: $HOSTS"
+
+          UPDOWN=""
+          if [ -x /etc/openvpn/update-systemd-resolved ]; then
+            UPDOWN="--script-security 2 --up /etc/openvpn/update-systemd-resolved --down /etc/openvpn/update-systemd-resolved --up-restart --dhcp-option DOMAIN-ROUTE ."
+          fi
+
+          stop_vpn() {
+            sudo pkill -f openvpn >/dev/null 2>&1
+            # tun0 이 완전히 사라질 때까지 기다린다 — 안 그러면 다음 서버에서 '죽은 터널'을 붙잡는다
+            for _ in $(seq 1 15); do
+              ip link show tun0 >/dev/null 2>&1 || return 0
+              sleep 1
+            done
+          }
+
+          for H in $HOSTS; do
+            echo "── 시도: $H"
+            rm -f /tmp/kr.ovpn /tmp/openvpn.log
+
+            # -f 필수: 이게 없으면 404 HTML 페이지를 설정파일로 받아 openvpn 이 즉시 죽는다
+            if ! curl -fsS --max-time 30 -o /tmp/kr.ovpn \
+              "https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${H}.udp.ovpn"; then
+              echo "→ 설정 내려받기 실패, 다음 서버로"
+              continue
+            fi
+            if ! grep -q '^remote ' /tmp/kr.ovpn; then
+              echo "→ 설정 파일이 이상함, 다음 서버로"
+              continue
+            fi
+
+            sudo openvpn --config /tmp/kr.ovpn \
+              --auth-user-pass /tmp/nordauth.txt \
+              --data-ciphers AES-256-GCM:AES-256-CBC --data-ciphers-fallback AES-256-CBC \
+              --connect-retry-max 2 --connect-timeout 10 \
+              $UPDOWN \
+              --daemon --log /tmp/openvpn.log
+            if [ $? -ne 0 ]; then
+              echo "→ openvpn 실행 실패, 다음 서버로"
+              stop_vpn
+              continue
+            fi
+
+            # '터널이 생겼나'가 아니라 '연결이 끝났나'를 본다. 자격증명 오류를 60초 기다리지 않도록.
+            CONNECTED=0
+            for _ in $(seq 1 20); do
+              sleep 1.5
+              if grep -q 'Initialization Sequence Completed' /tmp/openvpn.log 2>/dev/null; then CONNECTED=1; break; fi
+              if grep -qE 'AUTH_FAILED|auth-failure|Cannot resolve host|process restarting|Exiting due to fatal error' /tmp/openvpn.log 2>/dev/null; then break; fi
+              pgrep -f openvpn >/dev/null 2>&1 || break
+            done
+            if [ "$CONNECTED" != "1" ]; then
+              echo "→ 연결 실패"
+              tail -n 5 /tmp/openvpn.log 2>/dev/null
+              stop_vpn
+              continue
+            fi
+
+            C=$(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')
+            echo "출구 국가: ${C:-확인불가}"
+            if [ "$C" = "KR" ]; then
+              echo "✅ 한국 서버 연결: $H"
+              exit 0
+            fi
+
+            echo "→ 한국이 아님, 다음 서버로"
+            stop_vpn
+          done
+
+          echo "::warning::한국 서버에 붙지 못했습니다 — 점검은 KR 검증 단계에서 중단되고 경고만 발송됩니다"
+          tail -n 20 /tmp/openvpn.log 2>/dev/null
+          exit 0
+
+      - name: 접속점검 실행
+        env:
+          SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          SHEET_BRIDGE_TOKEN: ${{ secrets.SHEET_BRIDGE_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EXPECT_COUNTRY: KR
+          HTTP_TIMEOUT_MS: '15000'
+          CHECK_CONCURRENCY: '10'
+          RUN_MODE: ${{ inputs.mode || 'manual' }}
+        run: node check.js
+
+      - name: 뒷정리 (VPN 종료·자격증명 파일 삭제)
+        if: always()
+        run: |
+          sudo pkill -f openvpn || true
+          rm -f /tmp/nordauth.txt /tmp/kr.ovpn || true
