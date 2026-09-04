@@ -475,7 +475,10 @@ t('심의 차단이 방화벽 판정보다 먼저다', async () => {
   assert.equal(/한국에서 차단됨/.test(r.note), true);
 });
 
-t('방화벽 403 은 제한이 아니라 봇차단으로 찍힌다', async () => {
+// ★ 에이든 지시(2026-09-05): 방화벽 이야기는 담당자 화면에서 완전히 생략하고 '정상'으로만 보인다.
+//   사람은 잠깐 기다리거나 한 번 누르면 들어가므로 담당자가 할 일이 없다.
+//   내부적으로만 blocked 로 남겨 브라우저 재확인 대상을 고른다.
+t('방화벽 403 은 담당자에게 그냥 정상으로 보인다', async () => {
   const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' }, {
     retries: 0,
     fetchImpl: async () => ({
@@ -485,8 +488,9 @@ t('방화벽 403 은 제한이 아니라 봇차단으로 찍힌다', async () =>
       body: null,
     }),
   });
-  assert.equal(r.status, 'blocked');
-  assert.equal(/봇차단/.test(r.note), true);
+  assert.equal(r.status, 'blocked', '안에서는 구분해 둔다(브라우저 재확인 대상)');
+  assert.equal(r.note, '정상');
+  assert.equal(statusCell(r.status), '✅ 정상', '화면에는 방화벽 이야기가 안 나온다');
 });
 t('진짜 제한(403)은 그대로 제한', async () => {
   const r = await checkOne({ company: 'A', domain: 'https://a.com/', host: 'a.com' }, {
@@ -501,25 +505,27 @@ t('진짜 제한(403)은 그대로 제한', async () => {
 // ★ 2026-09-05 실측으로 바로잡음 —
 //   한국에서 진짜 차단되면 '응답 자체가 없다'(타임아웃·연결끊김). 방화벽이 403 화면을 돌려줬다는 건
 //   한국에서 그 서버까지 잘 닿았다는 뜻이다. 그래서 봇차단은 경보가 아니라 '정상 도달'로 센다.
-t('봇차단만 있으면 모두 정상으로 본다', () => {
+t('방화벽 화면만 있으면 그냥 모두 정상', () => {
   const rep = buildTelegramReport([
-    { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '봇차단(403)' },
+    { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '정상' },
     { company: 'A', domain: 'https://b.com/', status: 'up', note: '정상' },
   ], { nowKst: '2026-09-05 05:00', round: '수동' });
-  assert.equal(rep.blocked, 1);
   assert.equal(/총 2개 모두 정상 ✅/.test(rep.text), true, rep.text);
-  assert.equal(/서버까지 도달은 확인됨/.test(rep.text), true);
-  assert.equal(/확인 필요/.test(rep.text), false, '봇차단을 경보로 올리면 안 된다');
+  assert.equal(/확인 필요/.test(rep.text), false, '경보로 올리면 안 된다');
+  assert.equal(/방화벽|봇차단|🛡/.test(rep.text), false, '방화벽 이야기는 화면에 안 나온다');
 });
-t('진짜 문제와 섞이면 봇차단은 정상 쪽으로 센다', () => {
+t('진짜 문제가 있을 때만 그것만 알려준다', () => {
   const rep = buildTelegramReport([
-    { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '봇차단(403)' },
+    { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '정상' },
     { company: 'A', domain: 'https://b.com/', status: 'down', note: '접속실패(타임아웃)' },
   ], { nowKst: '2026-09-05 05:00', round: '수동' });
   assert.equal(/✅ 정상 1/.test(rep.text), true, rep.text);
   assert.equal(/❌ 이상 1/.test(rep.text), true);
   assert.equal(/확인 필요/.test(rep.text), true);
-  assert.equal(/a\.com/.test(rep.text.split('확인 필요')[1] || ''), false, '봇차단은 목록에 안 나온다');
+  const problems = rep.text.split('확인 필요')[1] || '';
+  assert.equal(/b\.com/.test(problems), true, '진짜 문제는 나온다');
+  assert.equal(/a\.com/.test(problems), false, '방화벽 화면은 안 나온다');
+  assert.equal(/방화벽|봇차단|🛡/.test(rep.text), false);
 });
 
 // ── 2-5. 막힌 것만 진짜 브라우저로 다시 확인 ────────────────
@@ -543,13 +549,13 @@ t('브라우저로 열리면 정상으로 바뀐다', async () => {
   assert.equal(results[0].status, 'up');
   assert.equal(/브라우저로 확인/.test(results[0].note), true);
 });
-t('브라우저로도 막히면 봇차단으로 남는다', async () => {
-  const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '봇차단(403)' }];
+t('브라우저로도 방화벽 화면이면 그냥 정상으로 남는다', async () => {
+  const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '정상' }];
   await recheckBlocked(results, {
     launchImpl: async () => fakeBrowser({ status: 403, title: 'Attention Required! | Cloudflare' }),
   });
   assert.equal(results[0].status, 'blocked');
-  assert.equal(/서버까지 도달 확인/.test(results[0].note), true);
+  assert.equal(results[0].note, '정상');
 });
 t('브라우저에서 다른 주소로 넘어가면 주소확인', async () => {
   const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '봇차단' }];
