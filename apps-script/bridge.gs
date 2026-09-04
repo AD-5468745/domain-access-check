@@ -928,9 +928,46 @@ function watchdog() {
   ].join('\n'), { inline_keyboard: [[{ text: '🔄 다시 점검', callback_data: 'run' }]] });
 }
 
+/**
+ * ★ 설치 함수를 '속성 하나'로 실행한다.
+ *
+ *   앱스스크립트 편집기의 [실행할 함수] 선택은 자동화에서 자주 어긋난다
+ *   (2026-09-05 실측: setupEdge 를 골랐는데 setupWebhook 이 실행됐다 —
+ *    잘못 실행되면 텔레그램 연결이 엉뚱한 곳으로 바뀌는 위험한 사고다).
+ *
+ *   그래서 설정 화면(프로젝트 설정 → 스크립트 속성)에서 PENDING_SETUP 에
+ *   아래 값 하나만 넣으면, 1분 안에 그 함수가 정확히 한 번 실행된다.
+ *
+ *     edge      → setupEdge()     즉답기(웹훅)로 전환
+ *     poll      → setupPolling()  예전 방식(1분 폴링 + 대기조)으로 복귀
+ *     all       → setupAll()      전체 재설치
+ *     commands  → setupCommands() '/' 명령 메뉴 재등록
+ *     pin       → pinGuide()      안내문 재발송·고정
+ *
+ *   결과는 PENDING_SETUP_RESULT 속성에 남는다. 값은 실행 직전에 지우므로
+ *   실패해도 1분마다 무한히 반복되지 않는다.
+ */
+function runPendingSetup_() {
+  var want = String(prop_('PENDING_SETUP', '')).trim().toLowerCase();
+  if (!want || want === '-') return;
+  setProp_('PENDING_SETUP', '-');          // 먼저 지운다 — 두 번 돌지 않게
+  try {
+    if (want === 'edge') setupEdge();
+    else if (want === 'poll') setupPolling();
+    else if (want === 'all') setupAll();
+    else if (want === 'commands') setupCommands();
+    else if (want === 'pin') pinGuide();
+    else throw new Error('모르는 값: ' + want);
+    setProp_('PENDING_SETUP_RESULT', nowKst_() + ' · ' + want + ' 실행 완료');
+  } catch (e) {
+    setProp_('PENDING_SETUP_RESULT', nowKst_() + ' · ' + want + ' 실패: ' + String(e && e.message || e).slice(0, 150));
+  }
+}
+
 /** 매시간 실행 — 설정된 시각이면 점검 요청 */
 function hourlyTick() {
   PROP_MEMO = null;
+  try { runPendingSetup_(); } catch (ignoreSetup2) {}
   try {
     checkTokenExpiry_();
     try { preheatRelay_(); } catch (ignorePre2) {}
@@ -1625,6 +1662,9 @@ function handleTelegram_(e) {
 function pollUpdates() {
   PROP_MEMO = null;
   PRE_ANSWERED = false;      // 폴링으로 직접 가져온 명령은 아무도 먼저 답하지 않았다
+
+  // ★ 설치 함수를 안전하게 실행하는 경로(아래 runPendingSetup_ 주석 참고)
+  try { runPendingSetup_(); } catch (ignoreSetup) {}
 
   // ★ 즉답기(웹훅) 모드면 여기서 아무것도 하지 않는다.
   //   특히 아래 409 자동복구가 '우리 웹훅'을 지워버리는 사고를 막는다.

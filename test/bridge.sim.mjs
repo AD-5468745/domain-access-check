@@ -945,6 +945,43 @@ const edge = (B, update, preAnswered) => JSON.parse(B.doPost({
 }
 
 // ═══════════════════════════════════════════════════════════
+// 11-3-6. 속성 하나로 설치 함수 실행 (편집기 함수 선택이 어긋나는 문제 우회)
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('WORKER_URL', 'https://w.example.workers.dev');
+  env.propStore.set('WEBHOOK_SECRET', 'sec');
+  env.propStore.set('PENDING_SETUP', 'edge');
+  B.pollUpdates();
+  t('속성으로 즉답기 전환이 실행됨', () => assert.equal(env.propStore.get('MODE'), 'webhook'));
+  t('텔레그램 웹훅이 워커 주소로 등록됨', () => {
+    const w = env.sent.find((x) => x.method === 'setWebhook');
+    assert.equal(!!w, true);
+    assert.equal(w.body.url, 'https://w.example.workers.dev/tg');
+    assert.equal(w.body.secret_token, 'sec');
+  });
+  t('실행 후 값을 지워 두 번 돌지 않음', () => assert.equal(env.propStore.get('PENDING_SETUP'), '-'));
+  t('결과가 기록됨', () => assert.equal(/edge 실행 완료/.test(env.propStore.get('PENDING_SETUP_RESULT')), true));
+}
+{
+  // 되돌리기도 같은 경로로 가능해야 한다
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  env.propStore.set('PENDING_SETUP', 'poll');
+  B.pollUpdates();
+  t('속성으로 예전 방식 복귀가 실행됨', () => assert.equal(env.propStore.get('MODE'), 'poll'));
+  t('복귀 시 웹훅을 떼어냄', () => assert.equal(env.sent.some((x) => x.method === 'deleteWebhook'), true));
+}
+{
+  // 실패해도 1분마다 무한 반복되면 안 된다
+  const { env, B } = fresh(SEED);
+  env.propStore.set('PENDING_SETUP', 'edge');    // WORKER_URL 없음 → 실패해야 함
+  B.pollUpdates();
+  t('실패해도 값이 지워져 반복되지 않음', () => assert.equal(env.propStore.get('PENDING_SETUP'), '-'));
+  t('실패 이유가 기록됨', () => assert.equal(/WORKER_URL/.test(env.propStore.get('PENDING_SETUP_RESULT')), true));
+}
+
+// ═══════════════════════════════════════════════════════════
 // 11-3-3. 자동 예열 — '첫 조작만 느린' 문제를 없앤다
 // ═══════════════════════════════════════════════════════════
 {
