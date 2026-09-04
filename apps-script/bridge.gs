@@ -1322,22 +1322,18 @@ function handleCallback_(cb) {
 // ═══════════════════════════════════════════════════════════════════
 // 텔레그램 진입점
 // ═══════════════════════════════════════════════════════════════════
-function handleTelegram_(e) {
-  var secret = prop_('WEBHOOK_SECRET', '');
-  if (secret) {
-    var got = (e.parameter && e.parameter.s) || '';
-    if (got !== secret) return json_({ ok: true, ignored: 'bad secret' });
-  }
-
-  var update = {};
-  try { update = JSON.parse((e.postData && e.postData.contents) || '{}'); } catch (ignore) {}
-
-  if (seenUpdate_(update.update_id)) return json_({ ok: true, ignored: 'duplicate' });
+/**
+ * ★ 명령 하나를 처리한다. 웹훅으로 오든 폴링으로 가져오든 여기로 모인다.
+ *   → 'ignored:...' 또는 'ok' 를 돌려준다(호출한 쪽이 응답을 만든다).
+ */
+function processUpdate_(update) {
+  if (!update) return 'ignored: empty';
+  if (seenUpdate_(update.update_id)) return 'ignored: duplicate';
 
   if (update.callback_query) {
     try { handleCallback_(update.callback_query); }
     catch (err) { try { tgAnswer_(update.callback_query.id, '오류: ' + String(err.message || err)); } catch (i2) {} }
-    return json_({ ok: true });
+    return 'ok';
   }
 
   // 수정된 글(edited_*)은 명령으로 처리하지 않는다 — 옛 글을 고쳐서 다시 실행되는 사고 방지
@@ -1353,23 +1349,92 @@ function handleTelegram_(e) {
       ' | 허용=' + (canControl_(String((msg && msg.chat && msg.chat.id) || '')) ? 'Y' : 'N'));
   } catch (ignoreDbg) {}
 
-  if (!msg || !msg.text) return json_({ ok: true, ignored: 'no text' });
+  if (!msg || !msg.text) return 'ignored: no text';
 
   var chatId = String((msg.chat && msg.chat.id) || '');
   var text = String(msg.text || '').trim();
   var actor = actorOf_(msg, null);
 
-  if (!canControl_(chatId)) {
-    // 허용되지 않은 곳: 조용히 무시. (설정이 비어 있으면 여기로 온다)
-    return json_({ ok: true, ignored: 'not allowed' });
-  }
+  // 허용되지 않은 곳: 조용히 무시. (설정이 비어 있으면 여기로 온다)
+  if (!canControl_(chatId)) return 'ignored: not allowed';
 
   try {
     handleTextCommand_(chatId, text, actor);
   } catch (err) {
     tgSend_(chatId, '❌ 오류\n\n<blockquote>' + esc_(String(err.message || err)) + '</blockquote>', kbMain_());
   }
-  return json_({ ok: true });
+  return 'ok';
+}
+
+function handleTelegram_(e) {
+  var secret = prop_('WEBHOOK_SECRET', '');
+  if (secret) {
+    var got = (e.parameter && e.parameter.s) || '';
+    if (got !== secret) return json_({ ok: true, ignored: 'bad secret' });
+  }
+
+  var update = {};
+  try { update = JSON.parse((e.postData && e.postData.contents) || '{}'); } catch (ignore) {}
+
+  return json_({ ok: true, result: processUpdate_(update) });
+}
+
+/**
+ * ★ 폴링 — 앱스스크립트가 1분마다 텔레그램에 '새 명령 있나요' 하고 가지러 간다.
+ *
+ * 왜 웹훅을 안 쓰나: 앱스스크립트 웹앱은 응답으로 302(넘김)를 돌려준다.
+ * 텔레그램은 302를 '실패'로 보고 같은 명령을 계속 재시도하며, 그동안 뒤에 온
+ * 명령이 줄줄이 막힌다(2026-09-04 실측: 대기 5건, "Wrong response from the
+ * webhook: 302 Found"). 구글 쪽에서 302를 없앨 방법이 없으므로 방향을 뒤집는다.
+ *
+ * 대가: 최대 1분 지연. 대신 명령이 사라지지 않는다.
+ */
+function pollUpdates() {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot) return;
+
+  // 두 실행이 겹치면 같은 명령을 두 번 처리한다 — 겹치면 조용히 물러난다.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+
+  try {
+    var offset = Number(prop_('TG_OFFSET', '0')) || 0;
+    var url = 'https://api.telegram.org/bot' + bot + '/getUpdates?timeout=0&limit=30' +
+      '&allowed_updates=' + encodeURIComponent(JSON.stringify(['message', 'channel_post', 'callback_query'])) +
+      (offset ? '&offset=' + offset : '');
+    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    var body = null;
+    try { body = JSON.parse(res.getContentText()); } catch (e1) { body = null; }
+
+    if (!body || !body.ok) {
+      var desc = (body && body.description) || ('HTTP ' + res.getResponseCode());
+      // 409 = 웹훅이 아직 걸려 있다 → 폴링과 공존 불가. 웹훅을 떼어내고 다음 회차에 이어간다.
+      if (/can't use getUpdates method while webhook is active/i.test(desc)) {
+        try { deleteWebhook(); } catch (i3) {}
+        return;
+      }
+      setProp_('LAST_ERROR', nowKst_() + ' 텔레그램 getUpdates 실패: ' + String(desc).slice(0, 150));
+      return;
+    }
+
+    var list = body.result || [];
+    if (!list.length) return;
+
+    var maxId = offset ? offset - 1 : 0;
+    for (var i = 0; i < list.length; i++) {
+      var u = list[i];
+      if (u.update_id > maxId) maxId = u.update_id;
+      // 하나가 터져도 나머지는 처리한다 — 한 명령 때문에 채널 전체가 멈추면 안 된다.
+      try { processUpdate_(u); }
+      catch (e2) {
+        try { setProp_('LAST_ERROR', nowKst_() + ' 명령 처리 오류: ' + String(e2 && e2.message || e2).slice(0, 150)); } catch (i4) {}
+      }
+      // 처리한 데까지는 즉시 확정한다 — 도중에 시간이 다 돼도 같은 명령을 다시 처리하지 않게.
+      setProp_('TG_OFFSET', String(maxId + 1));
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (i5) {}
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1516,19 +1581,24 @@ function setupAll() {
   sheet_(SHEET_SYS, true);
   log_('시스템', '설치', 'setupAll 실행');
   applySchedule_();
-  setupWebhook();
+  // ★ 웹훅이 아니라 폴링으로 받는다(위 pollUpdates 주석 참고). 웹훅이 남아 있으면 폴링이 막히므로 먼저 뗀다.
+  try { deleteWebhook(); } catch (ignore) {}
+  setProp_('TG_OFFSET', '0');
   sysWrite_('설치 완료');
-  Logger.log('✅ 설치 완료 — 시트 탭·스케줄·텔레그램 연결이 끝났습니다.');
+  Logger.log('✅ 설치 완료 — 시트 탭·스케줄·텔레그램 연결이 끝났습니다(명령은 1분 이내 처리).');
 }
 
 /** 매시간 트리거 하나만 둔다(시간대 설정 사고 방지 — 안에서 한국시간을 직접 계산) */
 function applySchedule_() {
   var ts = ScriptApp.getProjectTriggers();
   for (var i = 0; i < ts.length; i++) {
-    if (ts[i].getHandlerFunction() === 'hourlyTick') ScriptApp.deleteTrigger(ts[i]);
+    var fn = ts[i].getHandlerFunction();
+    if (fn === 'hourlyTick' || fn === 'pollUpdates') ScriptApp.deleteTrigger(ts[i]);
   }
   ScriptApp.newTrigger('hourlyTick').timeBased().everyHours(1).create();
-  Logger.log('스케줄 설정 완료 — 매시간 확인, 점검 시각: ' + settings_().hours.join(','));
+  // ★ 명령 수신 — 앱스스크립트가 만들 수 있는 가장 짧은 주기가 1분이다.
+  ScriptApp.newTrigger('pollUpdates').timeBased().everyMinutes(1).create();
+  Logger.log('스케줄 설정 완료 — 매시간 점검 확인 + 매분 명령 수신, 점검 시각: ' + settings_().hours.join(','));
 }
 
 function setupWebhook() {
@@ -1567,6 +1637,8 @@ function deleteWebhook() {
 function diag_() {
   var out = { ok: true, at: nowKst_() };
   out.allowedChats = allowedChats_();
+  out.수신방식 = '폴링(1분마다 가지러 감)';
+  out.처리한_명령번호 = prop_('TG_OFFSET', '0');
   out.lastUpdate = prop_('LAST_UPDATE_DEBUG', '(아직 없음)');
   out.lastError = prop_('LAST_ERROR', '(없음)');
   out.settings = settings_();

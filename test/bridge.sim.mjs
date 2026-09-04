@@ -101,13 +101,18 @@ function makeEnv() {
 
   const LockService = { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) };
 
+  const envRef = {};                       // 아래에서 만든 env 를 가리킨다(테스트가 응답을 바꿔 끼울 수 있게)
   const UrlFetchApp = {
     fetch(url, opts) {
       const body = opts && opts.payload ? JSON.parse(opts.payload) : {};
       if (url.indexOf('api.telegram.org') !== -1) {
-        const method = url.split('/').pop();
+        // getUpdates 는 질의문자열이 붙는다 — 메서드 이름만 떼어낸다.
+        const method = url.split('/').pop().split('?')[0];
         sent.push({ method, body });
-        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: true, result: { message_id: sent.length } }) };
+        // 테스트가 응답을 갈아끼울 수 있게(폴링 검증용). 기본은 성공.
+        const custom = envRef.tgReply ? envRef.tgReply(method, url, body) : null;
+        const out = custom || { ok: true, result: { message_id: sent.length } };
+        return { getResponseCode: () => 200, getContentText: () => JSON.stringify(out) };
       }
       if (url.indexOf('api.github.com') !== -1) {
         github.push({ url, body });
@@ -142,6 +147,7 @@ function makeEnv() {
         timeBased: () => ({
           after: () => ({ create: () => { triggers.push(tr); return tr; } }),
           everyHours: () => ({ create: () => { triggers.push(tr); return tr; } }),
+          everyMinutes: () => ({ create: () => { triggers.push(tr); return tr; } }),
         }),
       };
       return builder;
@@ -156,13 +162,16 @@ function makeEnv() {
 
   const Logger = { log: () => {} };
 
-  return { SpreadsheetApp, PropertiesService, CacheService, LockService, UrlFetchApp,
+  const built = { SpreadsheetApp, PropertiesService, CacheService, LockService, UrlFetchApp,
     Utilities, ScriptApp, ContentService, Logger, sheets, sent, github, triggers, propStore,
+    props: propStore,
     setNow: (iso) => { fakeNow = new Date(iso); }, getNow: () => fakeNow };
+  Object.assign(envRef, built);          // 가짜 fetch 가 env.tgReply 를 볼 수 있게 연결
+  return envRef;
 }
 
 const GS = fs.readFileSync(new URL('../apps-script/bridge.gs', import.meta.url), 'utf8');
-const EXPORTS = ['doGet', 'doPost', 'hourlyTick', 'watchdog', 'setupAll', 'applySchedule_',
+const EXPORTS = ['doGet', 'doPost', 'hourlyTick', 'watchdog', 'setupAll', 'applySchedule_', 'pollUpdates', 'processUpdate_',
   'loadModel_', 'saveModel_', 'settings_', 'menuText_', 'listText_', 'normalizeDomain_',
   'opAddDomains_', 'opRemoveDomain_', 'opAddCompany_', 'opRemoveCompany_', 'opRenameCompany_',
   'opMoveDomain_', 'opReplaceDomain_', 'undo_', 'sysWrite_', 'splitForTelegram_'];
@@ -687,16 +696,43 @@ const lastText = (env) => {
   t('setupAll 이 탭 4개 생성', () => {
     for (const n of ['접속점검', '결과', '이력', '시스템']) assert.equal(env.sheets.has(n), true, n + ' 없음');
   });
-  t('setupAll 이 스케줄 설치', () => assert.equal(env.triggers.some((x) => x.getHandlerFunction() === 'hourlyTick'), true));
-  t('setupAll 이 웹훅 등록', () => assert.equal(env.sent.some((s) => s.method === 'setWebhook'), true));
-  t('웹훅 URL 에 토큰 포함', () => {
-    const s = env.sent.find((x) => x.method === 'setWebhook');
-    assert.equal(/token=tok/.test(s.body.url) && /action=tg/.test(s.body.url), true);
-  });
-  t('웹훅이 버튼(callback_query)도 수신', () => {
-    const s = env.sent.find((x) => x.method === 'setWebhook');
-    assert.equal(s.body.allowed_updates.indexOf('callback_query') !== -1, true);
-  });
+  t('setupAll 이 점검 스케줄 설치', () => assert.equal(env.triggers.some((x) => x.getHandlerFunction() === 'hourlyTick'), true));
+  // ★ 2026-09-04: 웹훅은 앱스스크립트의 302 응답 때문에 텔레그램이 '실패'로 보고 명령이 밀린다.
+  //   그래서 웹훅을 떼고 1분 폴링으로 받는다.
+  t('setupAll 이 명령 수신(폴링) 스케줄 설치', () => assert.equal(env.triggers.some((x) => x.getHandlerFunction() === 'pollUpdates'), true));
+  t('setupAll 이 웹훅을 떼어냄', () => assert.equal(env.sent.some((s) => s.method === 'deleteWebhook'), true));
+  t('setupAll 이 웹훅을 걸지 않음', () => assert.equal(env.sent.some((s) => s.method === 'setWebhook'), false));
+}
+
+// 11-1. 폴링으로 명령 받기
+{
+  const { env, B } = fresh(SEED);
+  env.tgReply = (method) => (method === 'getUpdates'
+    ? { ok: true, result: [{ update_id: 101, channel_post: { chat: { id: -1001 }, text: '목록' } }] }
+    : { ok: true, result: {} });
+  B.pollUpdates();
+  t('폴링이 글 명령을 처리', () => assert.equal(/등록된 도메인/.test(lastText(env)), true));
+  t('폴링이 처리한 지점을 기록', () => assert.equal(env.props.get('TG_OFFSET'), '102'));
+
+  // 같은 명령이 또 와도 두 번 실행하지 않는다
+  const before = env.sent.filter((x) => x.method === 'sendMessage').length;
+  B.pollUpdates();
+  t('같은 명령 재수신 시 중복 실행 안 함', () => assert.equal(env.sent.filter((x) => x.method === 'sendMessage').length, before));
+}
+
+// 11-2. 웹훅이 걸려 있으면 폴링이 스스로 떼어낸다(409 회복)
+{
+  const { env, B } = fresh(SEED);
+  let calls = 0;
+  env.tgReply = (method) => {
+    if (method === 'getUpdates') {
+      calls += 1;
+      return { ok: false, description: "Conflict: can't use getUpdates method while webhook is active" };
+    }
+    return { ok: true, result: {} };
+  };
+  B.pollUpdates();
+  t('폴링이 막히면 웹훅을 떼어냄', () => assert.equal(env.sent.some((s) => s.method === 'deleteWebhook'), true));
 }
 
 // ═══════════════════════════════════════════════════════════
