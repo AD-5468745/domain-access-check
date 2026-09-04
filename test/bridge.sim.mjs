@@ -857,6 +857,47 @@ const lastText = (env) => {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 11-3-3. 자동 예열 — '첫 조작만 느린' 문제를 없앤다
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  env.setNow('2026-08-28T14:00:00+09:00');       // 업무시간
+  B.pollUpdates();
+  t('업무시간에는 대기조를 미리 깨운다', () => assert.equal(relayRuns(env).length, 1));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.setNow('2026-08-28T05:00:00+09:00');       // 새벽 5시 = 예열 시간 밖
+  B.pollUpdates();
+  t('새벽에는 미리 깨우지 않는다', () => assert.equal(relayRuns(env).length, 0));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('RELAY_PREHEAT', 'no');
+  env.setNow('2026-08-28T14:00:00+09:00');
+  B.pollUpdates();
+  t('예열을 꺼두면 미리 깨우지 않는다', () => assert.equal(relayRuns(env).length, 0));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.setNow('2026-08-28T14:00:00+09:00');
+  const hello = JSON.parse(B.doPost({ parameter: {}, postData: { contents: JSON.stringify({ token: 'tok', action: 'relay-hello', relayId: 'RP' }) } }).text);
+  assert.equal(hello.ok, true);
+  env.github.length = 0;
+  B.pollUpdates();
+  t('이미 깨어 있으면 또 깨우지 않는다', () => assert.equal(relayRuns(env).length, 0));
+}
+{
+  // 패널이 지금 빠른 상태인지 알려준다(버튼을 누른 뒤에는 알려줄 방법이 없으므로 미리 알린다)
+  const { env, B } = fresh(SEED);
+  post(B, msg('ㅁ'));
+  t('자는 중이면 패널이 미리 알려준다', () => assert.equal(/쉬는 중|최대 1분/.test(lastText(env)), true));
+  JSON.parse(B.doPost({ parameter: {}, postData: { contents: JSON.stringify({ token: 'tok', action: 'relay-hello', relayId: 'RQ' }) } }).text);
+  post(B, msg('메뉴'));
+  t('깨어 있으면 빠르다고 알려준다', () => assert.equal(/지금은 빠릅니다/.test(lastText(env)), true));
+}
+
+// ═══════════════════════════════════════════════════════════
 // 11-4. 패널을 쉽게 부르기
 // ═══════════════════════════════════════════════════════════
 {

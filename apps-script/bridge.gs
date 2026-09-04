@@ -711,9 +711,26 @@ function menuText_() {
     '마지막 점검 ' + esc_(prop_('LAST_RESULT_AT', '-')),
     esc_(prop_('LAST_RESULT_SUMMARY', '아직 점검 기록이 없습니다')) + '</blockquote>',
     '',
+    speedLine_(),
+    '',
     '<blockquote>이 패널이 위로 밀리면 <b>ㅁ</b> 이라고 보내면 다시 나옵니다.</blockquote>',
   ];
   return lines.join('\n');
+}
+
+/**
+ * 지금 반응이 빠른 상태인지 한 줄로 알려준다.
+ * ★ 버튼을 '누른 순간'에 '잠시만요'를 보낼 방법은 없다 —
+ *   대기조가 자는 동안은 눌렸다는 사실 자체를 아무도 모르기 때문이다.
+ *   그래서 누르기 '전에' 알 수 있게 패널에 상태를 적는다.
+ */
+function speedLine_() {
+  if (relayAlive_()) {
+    return '<blockquote>⚡ <b>지금은 빠릅니다</b> — 버튼 반응 2~4초</blockquote>';
+  }
+  return '<blockquote>💤 <b>지금은 쉬는 중입니다</b>\n' +
+    '다음 첫 조작 하나만 <b>최대 1분</b> 걸립니다. 한 번 깨어나면 그 뒤 20분간 2~4초입니다.\n' +
+    '반응이 없어 보여도 여러 번 누르지 마세요 — 누른 만큼 답이 쌓입니다.</blockquote>';
 }
 
 function listText_() {
@@ -812,6 +829,27 @@ function relayOwner_(body) {
   return prop_('RELAY_ID', '') === rid;
 }
 
+/**
+ * ★ 자동 예열 — '첫 조작만 느린' 문제를 없앤다.
+ *
+ *   대기조가 자고 있으면 버튼을 눌러도 아무도 눌린 걸 모르는 구간이 최대 1분 생긴다.
+ *   그 구간에는 '잠시만요' 조차 보낼 수 없다(눌렸다는 사실 자체를 모르므로).
+ *   → 없앨 방법은 하나뿐이다: 담당자가 쓰는 시간대에는 대기조를 미리 깨워 둔다.
+ *
+ *   기본 09시~다음날 02시(한국시간). 밤에는 켜지 않는다.
+ *   끄고 싶으면 스크립트 속성 RELAY_PREHEAT = no.
+ */
+function preheatRelay_() {
+  if (prop_('RELAY_PREHEAT', 'yes') === 'no') return;
+  if (relayAlive_()) return;
+  var h = kstHour_();
+  var from = Number(prop_('RELAY_HOURS_FROM', '9'));
+  var to = Number(prop_('RELAY_HOURS_TO', '2'));
+  var inHours = (from <= to) ? (h >= from && h < to) : (h >= from || h < to);
+  if (!inHours) return;
+  wakeRelay_();
+}
+
 function wakeRelay_() {
   try {
     if (prop_('RELAY_ENABLED', 'yes') === 'no') return;   // 끄고 싶으면 이 속성만 no 로
@@ -871,6 +909,7 @@ function hourlyTick() {
   PROP_MEMO = null;
   try {
     checkTokenExpiry_();
+    try { preheatRelay_(); } catch (ignorePre2) {}
     var s = settings_();
     if (s.paused) return;
     // ★ 매시간 트리거는 정각에 딱 맞춰 오지 않는다(08:56, 10:02 처럼 어긋난다).
@@ -1568,6 +1607,9 @@ function pollUpdates() {
   //   여기서 또 가져가면 같은 명령을 두 곳이 나눠 가져 순서가 꼬인다 — 조용히 물러난다.
   if (relayAlive_()) return;
 
+  // 자고 있다면, 업무시간에는 미리 깨워 둔다(첫 조작이 느려지지 않게).
+  try { preheatRelay_(); } catch (ignorePre) {}
+
   // 두 실행이 겹치면 같은 명령을 두 번 처리한다 — 겹치면 조용히 물러난다.
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
@@ -1857,6 +1899,8 @@ function diag_() {
     마지막_깨운시각: prop_('RELAY_LAST_WAKE_KST', '(없음)'),
     마지막_시작시각: prop_('RELAY_STARTED_AT', '(없음)'),
     마지막_오류: prop_('RELAY_LAST_ERROR', '(없음)'),
+    자동예열: prop_('RELAY_PREHEAT', 'yes') !== 'no',
+    예열시간: prop_('RELAY_HOURS_FROM', '9') + '시 ~ 다음날 ' + prop_('RELAY_HOURS_TO', '2') + '시 (한국시간)',
   };
   out.처리한_명령번호 = prop_('TG_OFFSET', '0');
   out.lastUpdate = prop_('LAST_UPDATE_DEBUG', '(아직 없음)');
@@ -1925,6 +1969,12 @@ function pinText_() {
     '',
     '<blockquote>패널이 뜨면 버튼으로 전부 조작할 수 있습니다.',
     '자세한 사용법은 패널의 [❓ 도움말].</blockquote>',
+    '',
+    '<blockquote>⏱ <b>반응 속도</b>',
+    '한동안 조용했다면 <b>첫 조작 하나만 최대 1분</b> 걸립니다(깨우는 중).',
+    '그 뒤 20분 동안은 2~4초면 답이 옵니다.',
+    '느리다고 여러 번 누르면 누른 만큼 답이 쌓입니다 — 한 번만 누르고 기다려 주세요.',
+    '지금이 빠른 상태인지 아닌지는 패널(<b>ㅁ</b>) 맨 아래에 표시됩니다.</blockquote>',
   ].join('\n');
 }
 
