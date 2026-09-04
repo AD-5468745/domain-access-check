@@ -1622,6 +1622,10 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
       assert.equal(/PROP_MEMO = null/.test(GS2.slice(at, at + 400)), true, fn + ' 에 기억 비우기 없음');
     }
   });
+  // ★ 빈 값 속성은 앱스스크립트 설정 화면을 잠근다(다른 속성까지 저장 불가)
+  t('속성에 빈 값을 저장하지 않는다', () => {
+    assert.equal(/setProp_\('RELAY_ID', ''\)/.test(GS2), false);
+  });
   t('고치면 목록 캐시를 반드시 버린다', () => {
     for (const fn of ['function saveModel_', 'function undo_']) {
       const at = GS2.indexOf(fn);

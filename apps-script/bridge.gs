@@ -840,7 +840,9 @@ function relayAlive_() {
 
 function relayTouch_() { setProp_('RELAY_ALIVE_UNTIL', String(Date.now() + RELAY_ALIVE_MS)); }
 
-function relayStop_() { setProp_('RELAY_ALIVE_UNTIL', '0'); setProp_('RELAY_ID', ''); }
+// ★ 값에 빈 문자열을 쓰지 않는다 — 앱스스크립트 설정 화면이 '필수 입력'으로 막아
+//   다른 속성까지 저장이 안 되는 사고가 있었다(2026-09-05).
+function relayStop_() { setProp_('RELAY_ALIVE_UNTIL', '0'); setProp_('RELAY_ID', '-'); }
 
 /** 지금 등록된 대기조가 보낸 신호인가 (고유번호가 없던 옛 방식은 그대로 허용) */
 function relayOwner_(body) {
