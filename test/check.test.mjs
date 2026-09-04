@@ -1,7 +1,7 @@
 // 로직 자동검증 — 네트워크 불필요. 실행: npm test
 import assert from 'node:assert/strict';
 import {
-  normalizeDomain, registrableDomain, sameSite, parseSheet, roundLabel,
+  normalizeDomain, normalizeTarget, registrableDomain, sameSite, parseSheet, roundLabel,
   buildSheetRows, buildTelegramReport, countByStatus, groupProblems,
   statusCell, escapeHtml, SHEET_HEADER,
 } from '../lib/core.js';
@@ -90,7 +90,14 @@ t('업체별 도메인 개수', () => assert.equal(parsed.domains.length, 5));
 t('1행은 점검 안 함', () => assert.equal(parsed.domains.some((d) => d.domain === '누드티비'), false));
 t('업체명 매핑', () => assert.equal(parsed.domains[0].company, '누드티비'));
 t('셀 좌표 기록', () => assert.equal(parsed.domains[0].cell, 'A2'));
-t('정규화 적용', () => assert.equal(parsed.domains.map((d) => d.domain).includes('a2.com'), true));
+t('적은 그대로 보존(www·경로·스킴)', () => {
+  const list = parsed.domains.map((d) => d.domain);
+  assert.equal(list.includes('www.a2.com'), true, 'www 를 임의로 떼면 안 된다');
+  assert.equal(list.includes('https://b1.com'), true, 'https:// 를 임의로 떼면 안 된다');
+  assert.equal(list.includes('b2.com/path'), true, '경로를 임의로 떼면 안 된다');
+});
+t('비교용 호스트는 따로 담는다', () =>
+  assert.equal(parsed.domains.find((d) => d.domain === 'www.a2.com').host, 'a2.com'));
 t('업체 내 중복 제거', () => assert.equal(parsed.domains.filter((d) => d.domain === 'a1.com').length, 1));
 t('중복은 skipped 기록', () => assert.equal(parsed.skipped.some((s) => s.reason === '업체 내 중복'), true));
 t('비도메인 skipped', () => assert.equal(parsed.skipped.some((s) => s.raw === '메모'), true));
@@ -333,8 +340,10 @@ const TG_LIMIT_GS = Number(/var\s+TG_LIMIT\s*=\s*(\d+)/.exec(GS)[1]);
 
 let GSL = null, GSS = null;
 t('bridge.gs 순수로직 블록 추출', () => {
-  GSL = extractBlock('PURE-LOGIC-START', 'PURE-LOGIC-END', ['normalizeDomain_', 'isIPv4_']);
+  GSL = extractBlock('PURE-LOGIC-START', 'PURE-LOGIC-END',
+    ['normalizeDomain_', 'isIPv4_', 'normalizeTarget_', 'targetOf_', 'targetHost_']);
   assert.equal(typeof GSL.normalizeDomain_, 'function');
+  assert.equal(typeof GSL.normalizeTarget_, 'function');
 });
 t('bridge.gs 분할 블록 추출', () => {
   GSS = extractBlock('PURE-SPLIT-START', 'PURE-SPLIT-END', ['splitForTelegram_'],
@@ -363,6 +372,78 @@ for (const input of CORPUS) {
   if (a !== b) diff++;
 }
 t('대조 불일치 0건', () => assert.equal(diff, 0));
+
+// ── 2-2. 적은 그대로 보존(normalizeTarget) — 브리지와 점검기가 같은 결과여야 한다 ──
+const TARGET_CORPUS = CORPUS.concat([
+  'https://ptt-852.com/?code=NDTV', 'http://zza-189.com/?code=ndtv',
+  'https://le-go-1122.com/?code=ndtv', 'https://a.com/?code=X#tag',
+  'HTTPS://A.COM/?code=X', 'www.a.com/?code=X', 'a.com/?code=X',
+  'javascript://a.com/?x=1', 'data://a.com/x', 'ftp://a.com/x',
+  'https://a.com/?msg=hi,there', 'https://a.com/path.', 'a.com,', '(a.com)',
+  'https://user:pw@a.com/?x=1', 'https://a.com:8443/?x=1',
+  'https://' + 'x'.repeat(520) + '.com/', 'https://', 'https://a', '//a.com/x',
+]);
+let tdiff = 0;
+for (const input of TARGET_CORPUS) {
+  const a = normalizeTarget(input);
+  const b = GSL ? GSL.normalizeTarget_(input) : '<추출실패>';
+  t(`대조(그대로): ${JSON.stringify(input)} → ${a ? a.target : null}`,
+    () => assert.deepEqual(b, a));
+  if (JSON.stringify(a) !== JSON.stringify(b)) tdiff++;
+}
+t('그대로 보존 대조 불일치 0건', () => assert.equal(tdiff, 0));
+
+// ── 2-3. 점검기가 '적힌 그대로' 접속하는가 ────────────────────
+t('적힌 https 로 그대로 접속한다', async () => {
+  let used = null;
+  await checkOne({ company: 'A', domain: 'https://ptt-852.com/?code=NDTV', host: 'ptt-852.com' },
+    { retries: 0, fetchImpl: async (u) => { used = u; return mkRes(200, u); } });
+  assert.equal(used, 'https://ptt-852.com/?code=NDTV');
+});
+t('적힌 http 를 https 로 바꾸지 않는다', async () => {
+  const seen = [];
+  await checkOne({ company: 'A', domain: 'http://zza-189.com/?code=ndtv', host: 'zza-189.com' },
+    { retries: 0, fetchImpl: async (u) => { seen.push(u); return mkRes(200, u); } });
+  assert.deepEqual(seen, ['http://zza-189.com/?code=ndtv']);
+});
+t('적힌 http 가 실패해도 https 로 몰래 넘어가지 않는다', async () => {
+  const seen = [];
+  const r = await checkOne({ company: 'A', domain: 'http://zza-189.com/?code=ndtv', host: 'zza-189.com' },
+    { retries: 1, fetchImpl: async (u) => { seen.push(u); throw new Error('x'); } });
+  assert.equal(seen.every((u) => u.startsWith('http://')), true, seen.join(' '));
+  assert.equal(r.status, 'down');
+});
+t('스킴을 안 적었을 때만 https → http 로 찾아본다', async () => {
+  const seen = [];
+  await checkOne({ company: 'A', domain: 'a.com', host: 'a.com' },
+    { retries: 0, fetchImpl: async (u) => { seen.push(u); if (u.startsWith('https')) throw new Error('tls'); return mkRes(200, u); } });
+  assert.deepEqual(seen, ['https://a.com/', 'http://a.com/']);
+});
+t('리다이렉트 판정은 주소(호스트)로만 한다', async () => {
+  const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://a.com/landing?code=X') });
+  assert.equal(r.status, 'up', '같은 주소 안에서 옮겨간 것은 정상이다');
+});
+t('다른 주소로 넘어가면 주소확인', async () => {
+  const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://other.com/') });
+  assert.equal(r.status, 'redir');
+});
+
+t('제휴 링크는 통째로 보존', () => {
+  const r = normalizeTarget('https://ptt-852.com/?code=NDTV');
+  assert.equal(r.target, 'https://ptt-852.com/?code=NDTV');
+  assert.equal(r.host, 'ptt-852.com');
+});
+t('http 도 그대로', () => assert.equal(normalizeTarget('http://zza-189.com/?code=ndtv').target, 'http://zza-189.com/?code=ndtv'));
+t('www 도 그대로', () => assert.equal(normalizeTarget('www.a.com').target, 'www.a.com'));
+t('비교용 호스트는 www 를 뗀다', () => assert.equal(normalizeTarget('www.a.com').host, 'a.com'));
+t('javascript: 는 주소가 아님', () => assert.equal(normalizeTarget('javascript://a.com/?x=1'), null));
+t('ftp: 는 주소가 아님', () => assert.equal(normalizeTarget('ftp://a.com/x'), null));
+t('쿼리가 있으면 끝 점을 함부로 떼지 않음', () =>
+  assert.equal(normalizeTarget('https://a.com/?x=1.').target, 'https://a.com/?x=1.'));
+t('주소만 적으면 그대로', () => assert.equal(normalizeTarget('a.com').target, 'a.com'));
+t('주소가 아니면 null', () => assert.equal(normalizeTarget('여기는 메모'), null));
 
 // 조합 입력으로도 두 구현이 같은 답을 내는지.
 // ★ 난수를 쓰면 어쩌다 한 번 실패해서 '실제 점검'까지 막히므로, 씨앗 고정 난수로 항상 같은 1000건을 본다.

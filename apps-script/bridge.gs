@@ -107,6 +107,60 @@ function normalizeDomain_(raw) {
   if (!/^([a-z]{2,}|xn--[a-z0-9-]+)$/.test(tld)) return null;
   return s;
 }
+
+/**
+ * 담당자가 넣은 주소를 **적은 그대로** 지킨다.
+ *   'https://ptt-852.com/?code=NDTV' → { target: 'https://ptt-852.com/?code=NDTV', host: 'ptt-852.com' }
+ *   'example.com'                    → { target: 'example.com', host: 'example.com' }
+ *   주소가 아니면 null.
+ *
+ * ★ 왜 normalizeDomain 으로 자르면 안 되나 (2026-09-05 에이든 지시)
+ *   제휴 링크는 `?code=NDTV` 가 핵심이다. 그걸 잘라내면 다른 링크가 되어
+ *   "내가 넣은 주소가 아닌 것"을 점검하게 된다. 그래서
+ *     저장·점검·표시 = target(적은 그대로)
+ *     비교·리다이렉트 판정 = host(주소 부분만)
+ *   두 가지를 나눠 쓴다.
+ *
+ * ★ http·https 만 허용한다. javascript: · data: 같은 것은 주소가 아니다.
+ */
+function normalizeTarget_(raw) {
+  if (raw === null || raw === undefined) return null;
+  var s = String(raw).trim();
+  if (!s) return null;
+
+  s = s.replace(/^[\s"'`<([]+/, '');
+  // 쿼리·해시가 있으면 끝의 점·쉼표를 함부로 떼지 않는다 — 코드 값의 일부일 수 있다.
+  s = /[?#]/.test(s) ? s.replace(/[\s"'`>\]]+$/, '') : s.replace(/[\s"'`>)\],.;]+$/, '');
+  if (!s) return null;
+  if (/\s/.test(s)) return null;
+  if (s.length > 500) return null;
+
+  var scheme = '';
+  var m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//.exec(s);
+  if (m) {
+    scheme = m[1].toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') return null;
+  }
+  var rest = m ? s.slice(m[0].length) : s;
+  rest = rest.replace(/^[^@/?#]*@/, '');
+  var hostPart = rest.split('/')[0].split('?')[0].split('#')[0];
+  var host = normalizeDomain_(hostPart);
+  if (!host) return null;
+  return { target: s, host: host };
+}
+
+/** 저장된 문자열에서 주소(호스트) 부분만. 비교·리다이렉트 판정용. */
+function targetHost_(raw) {
+  var t = normalizeTarget_(raw);
+  return t ? t.host : '';
+}
+
+/** 저장할 문자열(적은 그대로). 주소가 아니면 null. */
+function targetOf_(raw) {
+  var t = normalizeTarget_(raw);
+  return t ? t.target : null;
+}
+
 // <<<PURE-LOGIC-END>>>
 
 // ═══════════════════════════════════════════════════════════════════
@@ -292,7 +346,7 @@ function readModel_() {
     for (var r = 1; r < lastRow; r++) {
       var t = String((v[r] || [])[c] || '').trim();
       if (!t) continue;
-      var d = normalizeDomain_(t);
+      var d = targetOf_(t);
       if (d && list.indexOf(d) === -1) list.push(d);
     }
     if (name || list.length) out.push({ name: name || (COL_LETTERS.charAt(c) + '열'), domains: list });
@@ -338,6 +392,31 @@ function totalDomains_(model) {
   return n;
 }
 
+/** 이 업체에 같은 주소가 이미 있나 — 대소문자만 다른 것도 같은 것으로 본다 */
+function domainIndex_(list, target) {
+  var lower = String(target).toLowerCase();
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i]).toLowerCase() === lower) return i;
+  }
+  return -1;
+}
+
+/**
+ * 예전에 '주소만' 잘려 저장된 항목의 자리 번호.
+ * ★ 2026-09-05 이전에는 https·경로·?code= 를 잘라 저장했다.
+ *   담당자가 원래 링크를 다시 붙여넣으면 그 낡은 항목을 원래 형태로 되살린다(새로 늘리지 않는다).
+ */
+function bareHostIndex_(list, target) {
+  var host = targetHost_(target);
+  if (!host) return -1;
+  var lower = String(target).toLowerCase();
+  if (lower === host) return -1;                 // 지금 넣는 것도 '주소만'이면 되살릴 게 없다
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i]).toLowerCase() === host) return i;
+  }
+  return -1;
+}
+
 function findCompany_(model, name) {
   var key = String(name || '').trim().toLowerCase();
   for (var i = 0; i < model.length; i++) {
@@ -347,13 +426,36 @@ function findCompany_(model, name) {
 }
 
 /** 도메인이 어느 업체에 있는지 → [{ci, di}] */
+/**
+ * 등록된 주소를 찾는다. 적은 그대로 저장하므로 세 단계로 찾아준다.
+ *   ① 똑같이 적은 것  ② 대소문자만 다른 것  ③ 주소(호스트)만 적었을 때 그 호스트로 등록된 것
+ * ③ 덕분에 `삭제 zza-189.com` 처럼 짧게 적어도 `http://zza-189.com/?code=ndtv` 를 찾는다.
+ */
 function findDomain_(model, domain) {
-  var d = normalizeDomain_(domain);
-  var hits = [];
-  if (!d) return hits;
-  for (var i = 0; i < model.length; i++) {
-    var j = model[i].domains.indexOf(d);
-    if (j !== -1) hits.push({ ci: i, di: j });
+  var hits = [], i, j;
+  var raw = String(domain === null || domain === undefined ? '' : domain).trim();
+  if (!raw) return hits;
+  var t = normalizeTarget_(raw);
+  var want = t ? t.target : raw;
+  for (i = 0; i < model.length; i++) {
+    for (j = 0; j < model[i].domains.length; j++) {
+      if (model[i].domains[j] === want) hits.push({ ci: i, di: j });
+    }
+  }
+  if (hits.length) return hits;
+  var lower = want.toLowerCase();
+  for (i = 0; i < model.length; i++) {
+    for (j = 0; j < model[i].domains.length; j++) {
+      if (String(model[i].domains[j]).toLowerCase() === lower) hits.push({ ci: i, di: j });
+    }
+  }
+  if (hits.length) return hits;
+  var host = t ? t.host : '';
+  if (!host) return hits;
+  for (i = 0; i < model.length; i++) {
+    for (j = 0; j < model[i].domains.length; j++) {
+      if (targetHost_(model[i].domains[j]) === host) hits.push({ ci: i, di: j });
+    }
   }
   return hits;
 }
@@ -822,7 +924,7 @@ function helpText_() {
     '일시중지 / 재개',
     '되돌리기                 직전 변경 취소</blockquote>',
     '',
-    '<blockquote>주소는 https://·www·뒤 경로를 붙여도 알아서 정리됩니다.',
+    '<blockquote>주소는 <b>적으신 그대로</b> 등록·점검됩니다 — https·http·www·뒤 경로·<b>?code=</b> 전부 그대로.',
     '여러 개는 줄바꿈·띄어쓰기·쉼표 아무거나로 한 번에 넣으세요.</blockquote>',
     '',
     '📦 <b>한 번에 여러 개</b>',
@@ -1097,7 +1199,7 @@ function looksLikeDomain_(tok) {
 function splitTokens_(list) {
   var ok = [], bad = [], words = [];
   for (var i = 0; i < list.length; i++) {
-    var d = normalizeDomain_(list[i]);
+    var d = targetOf_(list[i]);
     if (d) { if (ok.indexOf(d) === -1) ok.push(d); continue; }
     if (looksLikeDomain_(list[i])) bad.push(String(list[i]));
     else words.push(String(list[i]));
@@ -1151,7 +1253,7 @@ function parseGroups_(text) {
     name = []; domains = [];
   }
   for (var i = 0; i < toks.length; i++) {
-    var d = normalizeDomain_(toks[i]);
+    var d = targetOf_(toks[i]);
     if (d) { if (domains.indexOf(d) === -1) domains.push(d); continue; }
     if (looksLikeDomain_(toks[i])) { bad.push(String(toks[i])); continue; }
     if (domains.length) flush();     // 주소가 나온 뒤의 말 = 다음 업체 시작
@@ -1168,7 +1270,7 @@ function opAddGroups_(groups, actor) {
     var out = [], touched = false;
     function begin() { if (!touched) { snapshot_('추가'); touched = true; } }
     for (var g = 0; g < groups.length; g++) {
-      var res = { company: groups[g].name, added: [], dup: [], bad: [], moved: [], created: false, error: '' };
+      var res = { company: groups[g].name, added: [], dup: [], bad: [], moved: [], upgraded: [], created: false, error: '' };
       var list = groups[g].domains;
       var ci = findCompany_(model, groups[g].name);
       if (ci === -1) {
@@ -1189,7 +1291,15 @@ function opAddGroups_(groups, actor) {
       }
       for (var i = 0; i < list.length; i++) {
         var d = list[i];
-        if (model[ci].domains.indexOf(d) !== -1) { res.dup.push(d); continue; }
+        if (domainIndex_(model[ci].domains, d) !== -1) { res.dup.push(d); continue; }
+        var gi = bareHostIndex_(model[ci].domains, d);
+        if (gi !== -1) {                          // 잘려 있던 옛 항목을 원래 형태로 되살린다
+          begin();
+          res.upgraded.push(model[ci].domains[gi] + ' → ' + d);
+          model[ci].domains[gi] = d;
+          res.added.push(d);
+          continue;
+        }
         if (model[ci].domains.length >= MAX_DOMAINS_PER_CO) {
           res.bad.push(d + ' (한 업체에 최대 ' + MAX_DOMAINS_PER_CO + '개까지)'); continue;
         }
@@ -1235,6 +1345,7 @@ function doAddGroups_(chatId, groups, actor, note) {
       };
       var k;
       var addedL = cap(r.added);      for (k = 0; k < addedL.length; k++) lines.push('+ ' + esc_(addedL[k]));
+      var upL = cap(r.upgraded || [], ' (원래 형태로 되살림)'); for (k = 0; k < upL.length; k++) lines.push('🔁 ' + esc_(upL[k]));
       var dupL = cap(r.dup, ' (이미 있음)');  for (k = 0; k < dupL.length; k++) lines.push('⏭ ' + esc_(dupL[k]));
       var badL = cap(r.bad, ' (주소 형식이 아님)'); for (k = 0; k < badL.length; k++) lines.push('⚠️ ' + esc_(badL[k]));
       var movL = cap(r.moved);        for (k = 0; k < movL.length; k++) lines.push('ℹ️ ' + esc_(movL[k]));
@@ -1258,7 +1369,7 @@ function opRemoveDomains_(rawList, companyName, actor) {
     var wanted = String(companyName === null || companyName === undefined ? '' : companyName).trim().toLowerCase();
     var removed = [], missing = [], wrongCo = [], ambiguous = [], bad = [], touched = false;
     for (var i = 0; i < rawList.length; i++) {
-      var d = normalizeDomain_(rawList[i]);
+      var d = targetOf_(rawList[i]);
       if (!d) { bad.push(String(rawList[i])); continue; }
       var all = findDomain_(model, d);
       if (!all.length) { missing.push(d); continue; }
@@ -1291,7 +1402,7 @@ function opMoveDomains_(rawList, toCompany, actor) {
     if (ti === -1) throw new Error('그런 업체가 없습니다: ' + toCompany);
     var moved = [], missing = [], already = [], bad = [], touched = false;
     for (var i = 0; i < rawList.length; i++) {
-      var d = normalizeDomain_(rawList[i]);
+      var d = targetOf_(rawList[i]);
       if (!d) { bad.push(String(rawList[i]) + ' (주소 형식이 아님)'); continue; }
       var hits = findDomain_(model, d);
       if (!hits.length) { missing.push(d); continue; }
@@ -1318,8 +1429,8 @@ function opReplaceDomains_(pairs, actor) {
     var model = loadModel_();
     var changed = [], missing = [], bad = [], touched = false;
     for (var i = 0; i < pairs.length; i++) {
-      var od = normalizeDomain_(pairs[i][0]);
-      var nd = normalizeDomain_(pairs[i][1]);
+      var od = targetOf_(pairs[i][0]);
+      var nd = targetOf_(pairs[i][1]);
       if (!od) { bad.push(String(pairs[i][0]) + ' (주소 형식이 아님)'); continue; }
       if (!nd) { bad.push(String(pairs[i][1]) + ' (새 주소가 올바르지 않음)'); continue; }
       var hits = findDomain_(model, od);
@@ -1422,11 +1533,18 @@ function opAddDomains_(companyName, rawList, actor) {
       model.push({ name: newName, domains: [] });
       ci = model.length - 1;
     }
-    var added = [], dup = [], bad = [], moved = [];
+    var added = [], dup = [], bad = [], moved = [], upgraded = [];
     for (var i = 0; i < rawList.length; i++) {
-      var d = normalizeDomain_(rawList[i]);
+      var d = targetOf_(rawList[i]);
       if (!d) { bad.push(String(rawList[i])); continue; }
-      if (model[ci].domains.indexOf(d) !== -1) { dup.push(d); continue; }
+      if (domainIndex_(model[ci].domains, d) !== -1) { dup.push(d); continue; }
+      var bi = bareHostIndex_(model[ci].domains, d);
+      if (bi !== -1) {                            // 잘려 있던 옛 항목을 원래 형태로 되살린다
+        upgraded.push(model[ci].domains[bi] + ' → ' + d);
+        model[ci].domains[bi] = d;
+        added.push(d);
+        continue;
+      }
       var other = findDomain_(model, d);
       if (other.length) moved.push(d + ' (〔' + model[other[0].ci].name + '〕에도 있음)');
       // ★ 한도를 넘으면 통째로 실패시키지 않는다 — 대량 등록에서 앞부분까지 날아가면 안 된다
@@ -1440,7 +1558,7 @@ function opAddDomains_(companyName, rawList, actor) {
       log_(actor, '도메인 추가', '〔' + model[ci].name + '〕 ' + added.join(', '));
       sysWrite_();
     }
-    return { company: model[ci].name, added: added, dup: dup, bad: bad, moved: moved };
+    return { company: model[ci].name, added: added, dup: dup, bad: bad, moved: moved, upgraded: upgraded };
   });
 }
 
@@ -1461,7 +1579,7 @@ function opReplaceDomain_(oldD, newD, actor) {
   var r = opReplaceDomains_([[oldD, newD]], actor);
   if (r.changed.length) return { company: r.changed[0].company, from: r.changed[0].from, to: r.changed[0].to };
   if (r.missing.length) throw new Error('등록되지 않은 주소입니다: ' + oldD);
-  if (!normalizeDomain_(oldD)) throw new Error('등록되지 않은 주소입니다: ' + oldD);
+  if (!targetOf_(oldD)) throw new Error('등록되지 않은 주소입니다: ' + oldD);
   throw new Error('새 주소가 올바르지 않습니다: ' + newD);
 }
 
@@ -1767,6 +1885,7 @@ function doAdd_(chatId, company, rawList, actor) {
     };
     var lines = bulkLines_('✅ 〔' + esc_(r.company) + '〕 ' + r.added.length + '개 추가', [
       ['+', cap(r.added)],
+      ['🔁', cap(r.upgraded || [], ' (원래 형태로 되살림)')],
       ['⏭', cap(r.dup, ' (이미 있음)')],
       ['⚠️', cap(r.bad, ' (주소 형식이 아님)')],
       ['ℹ️', cap(r.moved)],
@@ -1982,7 +2101,7 @@ function handleCallback_(cb) {
       return doAdd_(chatId, model[ci].name, st0.domains, actor);
     }
     setState_(chatId, { op: 'add-input', company: model[ci].name, by: actor, at: Date.now() });
-    return tgReply_(chatId, mid, '➕ 〔' + esc_(model[ci].name) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에.\nhttps·www·뒤 경로는 알아서 정리됩니다. (취소: 취소)</blockquote>');
+    return tgReply_(chatId, mid, '➕ 〔' + esc_(model[ci].name) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에.\n복사한 링크를 그대로 붙여넣으세요 — ?code= 까지 그대로 등록됩니다. (취소: 취소)</blockquote>');
   }
   if (head === 'an') {
     var stn = getState_(chatId);

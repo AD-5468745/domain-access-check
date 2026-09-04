@@ -278,9 +278,12 @@ const lastText = (env) => {
   const { env, B } = fresh(SEED);
   post(B, msg('추가 누드티비 https://WWW.Egg-9.com/promo egg-1.com 이건메모'));
   const model = B.loadModel_();
-  t('추가: 정규화되어 들어감', () => assert.equal(model[0].domains.indexOf('egg-9.com') !== -1, true));
+  // ★ 2026-09-05 변경 — 적은 그대로 저장한다(제휴 링크의 ?code=·스킴·www 가 잘리면 다른 링크가 된다)
+  t('추가: 적은 그대로 들어감', () =>
+    assert.equal(model[0].domains.indexOf('https://WWW.Egg-9.com/promo') !== -1, true));
+  t('추가: 임의로 자르지 않는다', () => assert.equal(model[0].domains.indexOf('egg-9.com'), -1));
   t('추가: 중복은 건너뜀', () => assert.equal(model[0].domains.filter((d) => d === 'egg-1.com').length, 1));
-  t('추가: 답장에 결과 표시', () => assert.equal(/egg-9\.com/.test(lastText(env)), true));
+  t('추가: 답장에 결과 표시', () => assert.equal(/Egg-9\.com\/promo/.test(lastText(env)), true));
   t('추가: 이미 있음 안내', () => assert.equal(/이미 있음/.test(lastText(env)), true));
   t('추가: 주소 아님 안내', () => assert.equal(/주소 형식이 아님/.test(lastText(env)), true));
   t('추가: 이력 기록됨', () => {
@@ -408,7 +411,8 @@ const lastText = (env) => {
 {
   const { B } = fresh(SEED);
   post(B, msg('변경 egg-1.com https://new-egg.com/x'));
-  t('주소 갈아끼우기(정규화 포함)', () => assert.deepEqual(B.loadModel_()[0].domains, ['new-egg.com', 'egg-5.com']));
+  t('주소 갈아끼우기는 새 주소를 적은 그대로', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, ['https://new-egg.com/x', 'egg-5.com']));
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1158,7 +1162,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   post(B, cbq('a:0'));
   t('여러 줄 붙여넣기: 고른 업체에 전부 들어감', () => {
     const d = B.loadModel_()[0].domains;
-    assert.equal(['new-1.com', 'new-2.com', 'new-3.com'].every((x) => d.indexOf(x) !== -1), true);
+    assert.equal(['new-1.com', 'new-2.com', 'https://www.new-3.com/x'].every((x) => d.indexOf(x) !== -1), true);
   });
 }
 {
@@ -1542,6 +1546,87 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   post(B, msg('메뉴'));
   t('점검이 최신이면 재촉하지 않는다', () =>
     assert.equal(/아직 점검하지 않았습니다/.test(lastText(env)), false));
+}
+
+// ═══════════════════════════════════════════════════════════
+// 12-4. 적은 그대로 등록 (2026-09-05 에이든 지시)
+//   제휴 링크는 ?code=... 가 핵심이다. 잘리면 다른 링크를 점검하게 된다.
+//   실제로 넣었던 목록 그대로 시험한다.
+// ═══════════════════════════════════════════════════════════
+const AIDEN_URLS = [
+  'https://ptt-852.com/?code=NDTV',
+  'https://cha-787.com/?code=NDTV',
+  'https://cba-654.com/?code=NDTV',
+  'http://zza-189.com/?code=ndtv',
+  'https://tgtg-0004.com/?code=ndtv',
+  'https://le-go-1122.com/?code=ndtv',
+  'http://mama-0102.com/?code=ndtv',
+  'https://ho-135.com/?code=ndtv',
+  'https://do-4040.com/?code=ndtv',
+  'https://ol-1122.com/?code=ndtv',
+];
+{
+  const { env, B } = fresh([{ name: '짱구계열', domains: [] }]);
+  post(B, msg('추가 짱구계열\n' + AIDEN_URLS.join('\n')));
+  t('10개가 한 글자도 안 바뀌고 그대로 저장된다', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, AIDEN_URLS));
+  t('code 대문자·소문자가 그대로 남는다', () => {
+    const d = B.loadModel_()[0].domains;
+    assert.equal(d[0].endsWith('?code=NDTV'), true);
+    assert.equal(d[3].endsWith('?code=ndtv'), true);
+  });
+  t('http 와 https 가 적힌 그대로 남는다', () => {
+    const d = B.loadModel_()[0].domains;
+    assert.equal(d[3].startsWith('http://'), true);
+    assert.equal(d[4].startsWith('https://'), true);
+  });
+  t('목록 화면에도 그대로 보인다', () => {
+    post(B, msg('목록'));
+    assert.equal(lastText(env).includes('https://ptt-852.com/?code=NDTV'), true);
+  });
+}
+{
+  // 옛날에 잘려 저장된 것을 다시 붙여넣으면 원래 형태로 되살아난다(새로 늘어나지 않는다)
+  const { env, B } = fresh([{ name: '짱구계열', domains: ['zza-189.com', 'ho-135.com'] }]);
+  post(B, msg('추가 짱구계열 http://zza-189.com/?code=ndtv https://ho-135.com/?code=ndtv'));
+  t('잘려 있던 항목이 원래 링크로 되살아난다', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, ['http://zza-189.com/?code=ndtv', 'https://ho-135.com/?code=ndtv']));
+  t('되살렸다는 사실을 알려준다', () => assert.equal(/되살림/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh([{ name: 'A', domains: ['https://a.com/?code=X'] }]);
+  post(B, msg('추가 A https://a.com/?code=X'));
+  t('똑같은 링크는 이미 있음', () => {
+    assert.equal(B.loadModel_()[0].domains.length, 1);
+    assert.equal(/이미 있음/.test(lastText(env)), true);
+  });
+  post(B, msg('추가 A https://a.com/?code=Y'));
+  t('코드가 다르면 다른 링크로 본다', () => assert.equal(B.loadModel_()[0].domains.length, 2));
+  post(B, msg('추가 A http://a.com/?code=X'));
+  t('스킴이 다르면 다른 링크로 본다', () => assert.equal(B.loadModel_()[0].domains.length, 3));
+}
+{
+  // 짧게 적어도 찾아준다 — 담당자가 긴 링크를 다시 치지 않아도 되게
+  const { env, B } = fresh([{ name: 'A', domains: ['http://zza-189.com/?code=ndtv', 'b.com'] }]);
+  post(B, msg('삭제 zza-189.com'));
+  t('주소만 적어도 그 링크를 지운다', () => assert.deepEqual(B.loadModel_()[0].domains, ['b.com']));
+}
+{
+  const { env, B } = fresh([{ name: 'A', domains: ['https://a.com/?code=X', 'https://a.com/?code=Y'] }]);
+  post(B, msg('삭제 a.com'));
+  t('같은 주소로 여러 링크가 있으면 함부로 지우지 않는다', () => {
+    assert.equal(B.loadModel_()[0].domains.length, 2);
+    assert.equal(/여러/.test(lastText(env)), true);
+  });
+  post(B, msg('삭제 https://a.com/?code=Y'));
+  t('정확히 적으면 그것만 지운다', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, ['https://a.com/?code=X']));
+}
+{
+  // 주소가 아닌 것은 여전히 막는다 — 보안
+  const { env, B } = fresh([{ name: 'A', domains: [] }]);
+  post(B, msg('추가 A javascript://a.com/?x=1'));
+  t('javascript: 같은 것은 주소로 받지 않는다', () => assert.equal(B.loadModel_()[0].domains.length, 0));
 }
 
 // ═══════════════════════════════════════════════════════════
