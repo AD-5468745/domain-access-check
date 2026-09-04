@@ -93,6 +93,28 @@ while i < len(lines):
 
 body = '\n'.join(out)
 
+# ── 표지: 제목 + 머리말 + 목차 ────────────────────────────
+titles = re.findall(r'<h2>(.*?)</h2>', body)
+h1m = re.search(r'<h1>(.*?)</h1>', body)
+title = h1m.group(1) if h1m else '접속점검 사용법'
+lead = ''
+lm = re.search(r'</h1>\s*<p>(.*?)</p>', body, re.S)
+if lm:
+    lead = lm.group(1)
+    body = body.replace('<p>' + lead + '</p>', '', 1)
+body = re.sub(r'<h1>.*?</h1>', '', body, count=1)
+
+toc = ''.join('<li><b>%d</b><span>%s</span></li>' % (i + 1, re.sub(r'^\d+\.\s*', '', t))
+              for i, t in enumerate(titles))
+cover = (u'<div id="cover">'
+         u'<div class="big">' + title + u'</div>'
+         u'<div class="lead">' + lead + u'</div>'
+         u'<div id="toc"><h4>\ubaa9\ucc28 \u00b7 \ud55c \ud56d\ubaa9\uc529 \ud55c \ucabd</h4><ol>' + toc + u'</ol></div>'
+         u'<div class="seal">\ub204\ub4dcTV \ub0b4\ubd80\uc790\ub8cc\uc785\ub2c8\ub2e4. '
+         u'\ub2e4\ub978 \uacf3\uc5d0 \uc62e\uae30\uac70\ub098 \ubc30\ud3ec\ud558\uc9c0 \ub9c8\uc138\uc694.</div>'
+         u'</div>')
+body = cover + body
+
 # 워터마크 — 글자 '뒤'에 깔린다. 고정 요소라 모든 쪽에 똑같이 반복된다.
 marks = []
 for r in range(9):
@@ -106,7 +128,7 @@ CSS = u'''
 html, body { margin:0; padding:0; }
 body {
   font-family: "Noto Sans CJK KR", "Noto Sans KR", sans-serif;
-  color:#16302a; font-size:10.4pt; line-height:1.72; -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  color:#16302a; font-size:10.8pt; line-height:1.75; -webkit-print-color-adjust:exact; print-color-adjust:exact;
 }
 /* ── 워터마크: 본문 '뒤'. 고정이라 모든 쪽에 반복된다 ── */
 #wm { position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden; }
@@ -122,21 +144,38 @@ body {
 }
 #page { position:relative; z-index:1; }
 /* ── 머리·꼬리 ── */
-#brand { display:flex; align-items:center; gap:9px; padding-bottom:9px; border-bottom:2.5px solid #0FA36B; margin-bottom:16px; }
+#cover { break-after:page; }
+#cover .big { font-size:30pt; font-weight:900; letter-spacing:-.03em; color:#0B3D2C; margin:22mm 0 6px; }
+#cover .lead { font-size:11.5pt; color:#3d5f54; line-height:1.8; margin-bottom:26px; }
+#cover .lead strong { color:#0B7A50; }
+#toc { border:1px solid #d9efe6; border-radius:10px; background:#fbfefc; padding:16px 20px; }
+#toc h4 { margin:0 0 10px; font-size:10pt; font-weight:800; color:#0B7A50; letter-spacing:.04em; }
+#toc ol { margin:0; padding-left:0; list-style:none; counter-reset:t; }
+#toc li { display:flex; align-items:baseline; gap:9px; padding:5px 0; border-bottom:1px dotted #dcece5; font-size:10.4pt; }
+#toc li:last-child { border-bottom:0; }
+#toc li b { min-width:22px; color:#0FA36B; font-weight:900; }
+#cover .seal { margin-top:24px; padding:11px 15px; border-radius:9px; background:#eafaf3;
+  border:1px solid #cdeade; color:#0B5B3E; font-size:9.6pt; font-weight:700; }
+/* 머리글도 고정 — 모든 쪽에 브랜드가 찍힌다 */
+#brand { position:fixed; top:-16mm; left:0; right:0; z-index:2; background:#fff;
+  display:flex; align-items:center; gap:9px; padding-bottom:8px; border-bottom:2.5px solid #0FA36B; }
 #brand .dot { width:22px; height:22px; border-radius:7px; background:linear-gradient(135deg,#25D69A,#0FA36B); }
 #brand .nm { font-weight:900; font-size:12.5pt; letter-spacing:-.01em; color:#0B7A50; }
 #brand .sub { margin-left:auto; font-size:8.6pt; color:#6b8b80; }
-#page { padding-bottom: 11mm; }
-#foot { position:fixed; left:0; right:0; bottom:0; z-index:2; background:#fff;
+#page { }
+#foot { position:fixed; left:0; right:0; bottom:-13mm; z-index:2; background:#fff;
   display:flex; font-size:8pt; color:#7d998e; border-top:1px solid #e3efe9; padding-top:5px; }
 #foot .r { margin-left:auto; font-weight:700; color:#0B7A50; }
 /* ── 본문 ── */
 h1 { font-size:21pt; font-weight:900; letter-spacing:-.02em; margin:2px 0 6px; color:#0B3D2C; }
-h2 { font-size:13.4pt; font-weight:800; margin:22px 0 8px; padding-left:11px; border-left:5px solid #25D69A; color:#0B3D2C;
-     break-after:avoid; }
+/* ★ 항목 하나당 한 쪽 — 크롬이 인쇄할 때 h2 앞에서 반드시 쪽을 넘긴다 */
+h2 { font-size:15pt; font-weight:900; margin:0 0 14px; padding:0 0 9px;
+     border-bottom:3px solid #25D69A; color:#0B3D2C;
+     break-before:page; break-after:avoid; }
+h2:first-of-type { break-before:auto; }
+hr { display:none; }   /* 쪽이 나뉘므로 구분선이 필요 없다 */
 h3 { font-size:11.2pt; font-weight:800; margin:15px 0 5px; color:#0B7A50; break-after:avoid; }
 p { margin:7px 0; }
-hr { border:0; border-top:1px dashed #cfe4da; margin:16px 0; }
 strong { font-weight:800; color:#0B3D2C; }
 code { font-family:"Noto Sans CJK KR","DejaVu Sans Mono",monospace; font-size:9.2pt; background:#eafaf3; color:#0B7A50;
        padding:1px 5px; border-radius:4px; border:1px solid #d3f0e3; }
@@ -157,12 +196,7 @@ HTML = (u'<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         u'<title>\uc811\uc18d\uc810\uac80 \uc0ac\uc6a9\ubc95 \u00b7 \ub204\ub4dcTV</title>'
         u'<style>' + CSS + u'</style></head><body>'
         u'<div id="wm">' + wm + u'<b>\ub204\ub4dcTV \u00b7 \ub0b4\ubd80\uc790\ub8cc</b></div>'
-        u'<div id="foot"><span>\ub204\ub4dcTV \uc811\uc18d\uc810\uac80 \u00b7 \ub2f4\ub2f9\uc790\uc6a9 \uc0ac\uc6a9\ubc95</span>'
-        u'<span class="r">\ub2e4\ub978 \uacf3\uc5d0 \uc62e\uae30\uac70\ub098 \ubc30\ud3ec\ud558\uc9c0 \ub9c8\uc138\uc694</span></div>'
-        u'<div id="page">'
-        u'<div id="brand"><div class="dot"></div><div class="nm">\ub204\ub4dcTV</div>'
-        u'<div class="sub">\ub0b4\ubd80\uc790\ub8cc \u00b7 \ubb34\ub2e8 \ubc30\ud3ec \uae08\uc9c0</div></div>'
-        + body + u'</div></body></html>')
+        u'<div id="page">' + body + u'</div></body></html>')
 
 io.open(OUT, 'w', encoding='utf-8').write(HTML)
 print('만들었습니다:', OUT, '(%d자)' % len(HTML))
