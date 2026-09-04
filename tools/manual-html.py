@@ -30,6 +30,10 @@ def inline(s):
     s = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', s)
     return s
 
+# ★ 어느 항목부터 새 쪽에서 시작할지 (에이든 지정 2026-09-05)
+#   5·6·7 은 한 쪽에, 8·9 도 한 쪽에 모은다.
+NEWPAGE = {1, 2, 3, 4, 5, 8}
+
 out = []
 lines = md.split('\n')
 i = 0
@@ -52,7 +56,12 @@ while i < len(lines):
     m = re.match(r'^(#{1,4})\s+(.*)$', ln)
     if m:
         lvl = len(m.group(1))
-        out.append('<h%d>%s</h%d>' % (lvl, inline(m.group(2)), lvl)); i += 1; continue
+        txt = m.group(2)
+        cls = ''
+        if lvl == 2:
+            num = re.match(r'^(\d+)\.', txt)
+            cls = ' class="np"' if (num and int(num.group(1)) in NEWPAGE) else ' class="cont"'
+        out.append('<h%d%s>%s</h%d>' % (lvl, cls, inline(txt), lvl)); i += 1; continue
     # 표
     if ln.startswith('|') and i + 1 < len(lines) and re.match(r'^\|[\s:\-|]+\|$', lines[i+1].strip()):
         head = [c.strip() for c in ln.strip().strip('|').split('|')]
@@ -170,8 +179,9 @@ body {
 h1 { font-size:21pt; font-weight:900; letter-spacing:-.02em; margin:2px 0 6px; color:#0B3D2C; }
 /* ★ 항목 하나당 한 쪽 — 크롬이 인쇄할 때 h2 앞에서 반드시 쪽을 넘긴다 */
 h2 { font-size:15pt; font-weight:900; margin:0 0 14px; padding:0 0 9px;
-     border-bottom:3px solid #25D69A; color:#0B3D2C;
-     break-before:page; break-after:avoid; }
+     border-bottom:3px solid #25D69A; color:#0B3D2C; break-after:avoid; }
+h2.np { break-before:page; }              /* 이 항목부터 새 쪽 */
+h2.cont { break-before:auto; margin-top:26px; }  /* 앞 항목과 같은 쪽에 이어 붙는다 */
 h2:first-of-type { break-before:auto; }
 hr { display:none; }   /* 쪽이 나뉘므로 구분선이 필요 없다 */
 h3 { font-size:11.2pt; font-weight:800; margin:15px 0 5px; color:#0B7A50; break-after:avoid; }
