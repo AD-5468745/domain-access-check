@@ -103,7 +103,7 @@ while i < len(lines):
 body = '\n'.join(out)
 
 # ── 표지: 제목 + 머리말 + 목차 ────────────────────────────
-titles = re.findall(r'<h2>(.*?)</h2>', body)
+titles = re.findall(r'<h2[^>]*>(.*?)</h2>', body)   # class 가 붙어도 잡히게
 h1m = re.search(r'<h1>(.*?)</h1>', body)
 title = h1m.group(1) if h1m else '접속점검 사용법'
 lead = ''
@@ -118,7 +118,7 @@ toc = ''.join('<li><b>%d</b><span>%s</span></li>' % (i + 1, re.sub(r'^\d+\.\s*',
 cover = (u'<div id="cover">'
          u'<div class="big">' + title + u'</div>'
          u'<div class="lead">' + lead + u'</div>'
-         u'<div id="toc"><h4>\ubaa9\ucc28 \u00b7 \ud55c \ud56d\ubaa9\uc529 \ud55c \ucabd</h4><ol>' + toc + u'</ol></div>'
+         u'<div id="toc"><h4>\ubaa9\ucc28</h4><ol>' + toc + u'</ol></div>'
          u'<div class="seal">\ub204\ub4dcTV \ub0b4\ubd80\uc790\ub8cc\uc785\ub2c8\ub2e4. '
          u'\ub2e4\ub978 \uacf3\uc5d0 \uc62e\uae30\uac70\ub098 \ubc30\ud3ec\ud558\uc9c0 \ub9c8\uc138\uc694.</div>'
          u'</div>')
@@ -157,12 +157,13 @@ body {
 #cover .big { font-size:30pt; font-weight:900; letter-spacing:-.03em; color:#0B3D2C; margin:22mm 0 6px; }
 #cover .lead { font-size:11.5pt; color:#3d5f54; line-height:1.8; margin-bottom:26px; }
 #cover .lead strong { color:#0B7A50; }
-#toc { border:1px solid #d9efe6; border-radius:10px; background:#fbfefc; padding:16px 20px; }
-#toc h4 { margin:0 0 10px; font-size:10pt; font-weight:800; color:#0B7A50; letter-spacing:.04em; }
+#toc { border:1px solid #d9efe6; border-radius:10px; background:#fbfefc; padding:20px 24px; }
+#toc h4 { margin:0 0 14px; font-size:11.5pt; font-weight:800; color:#0B7A50; letter-spacing:.04em; }
 #toc ol { margin:0; padding-left:0; list-style:none; counter-reset:t; }
-#toc li { display:flex; align-items:baseline; gap:9px; padding:5px 0; border-bottom:1px dotted #dcece5; font-size:10.4pt; }
+#toc li { display:flex; align-items:baseline; gap:12px; padding:8px 0; border-bottom:1px dotted #dcece5;
+          font-size:13pt; font-weight:600; color:#1d4438; }
 #toc li:last-child { border-bottom:0; }
-#toc li b { min-width:22px; color:#0FA36B; font-weight:900; }
+#toc li b { min-width:26px; font-size:13.5pt; color:#0FA36B; font-weight:900; }
 #cover .seal { margin-top:24px; padding:11px 15px; border-radius:9px; background:#eafaf3;
   border:1px solid #cdeade; color:#0B5B3E; font-size:9.6pt; font-weight:700; }
 /* 머리글도 고정 — 모든 쪽에 브랜드가 찍힌다 */
