@@ -676,7 +676,7 @@ const lastText = (env) => {
   const { env, B } = fresh([{ name: 'A', domains: many }]);
   post(B, cbq('del'));
   post(B, cbq('d:0'));
-  t('주소 40개 초과 시 안내 표시', () => assert.equal(/앞 40개만/.test(lastText(env)), true));
+  t('주소 39개 초과 시 안내 표시', () => assert.equal(/앞 39개만/.test(lastText(env)), true));
   t('버튼은 41개 이하(40 + 메뉴로)', () => {
     const kb = lastSent(env).body.reply_markup.inline_keyboard;
     assert.equal(kb.length <= 41, true);
@@ -1394,14 +1394,24 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('되돌릴 것 없으면 버튼도 안내', () => assert.equal(/되돌릴 내용이 없습니다/.test(lastText(env)), true));
 }
 
-// (15) 40개 초과 안내 문구가 실제 명령과 일치
+// (15) 39개 초과 안내 문구가 실제 동작하는 명령인지 — 문구만 맞추고 끝내지 않는다
 {
   const many = [];
   for (let i = 0; i < 60; i++) many.push('d' + i + '.com');
   const { env, B } = fresh([{ name: 'A', domains: many }]);
   post(B, cbq('del'));
   post(B, cbq('d:0'));
-  t('안내 문구가 실제 명령 형태', () => assert.equal(/삭제 example\.com/.test(lastText(env)), true));
+  const guide = lastText(env);
+  t('안내 문구가 실제 명령 형태', () => assert.equal(/삭제 a\.com b\.com/.test(guide), true));
+  t('안내 문구에 [여러 개 한 번에] 를 알려준다', () => assert.equal(/여러 개 한 번에/.test(guide), true));
+  // 안내대로 따라 해서 진짜 지워지는지
+  post(B, msg('삭제 d0.com d1.com'));
+  t('안내대로 여러 개를 한 번에 지울 수 있다', () => {
+    const d = B.loadModel_()[0].domains;
+    assert.equal(d.indexOf('d0.com'), -1);
+    assert.equal(d.indexOf('d1.com'), -1);
+    assert.equal(d.length, 58);
+  });
 }
 
 // (16) 도메인 규칙이 core.js 와 같은지(앱스스크립트 쪽에서도 확인)
@@ -1446,6 +1456,16 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
     ['도움말', /사용법/],
     ['설정', /현재 설정/],
     ['취소', /취소/],
+    // ★ 설명서 '여러 개를 한 번에' 표에 적힌 그대로 — 문서만 고치고 코드가 안 따라오는 일 방지
+    ['추가 누드티비 zz1.com zz2.com zz3.com', /3개 추가/],
+    ['삭제 egg-1.com egg-5.com', /2개 삭제/],
+    ['이동 egg-1.com egg-5.com 파트너사', /2개 이동/],
+    ['변경\negg-1.com zz8.com\negg-5.com zz9.com', /2개 변경/],
+    ['업체추가 가업체\n나업체', /2곳 추가/],
+    ['업체삭제 누드티비\n파트너사', /2곳을 도메인/],
+    ['이름변경 누드티비 누드티비2\n파트너사 파트너사2', /2개 변경/],
+    ['누드티비\nzz1.com\nzz2.com', /2개 추가/],
+    ['zz1.com zz2.com', /어느 업체에/],
   ];
   for (const [cmd, expect] of COMMANDS) {
     const { env, B } = fresh(SEED);
@@ -1609,6 +1629,23 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('즉답은 기다리지 않고 쏘아 보낸다(처리를 늦추지 않게)', () => {
     assert.equal(/await answerNow/.test(RELAY_JS), false);
   });
+  // ★ 에이든 지시(2026-09-05) — '잠시만요!' 팝업 문구는 즉답기·대기조가 같아야 한다
+  t("즉답 팝업 문구가 '⏳ 잠시만요!' 로 같다", () => {
+    const w = (WORKER_JS.match(/text: '([^']*잠시만요[^']*)'/) || [])[1];
+    const r = (RELAY_JS.match(/text: '([^']*잠시만요[^']*)'/) || [])[1];
+    assert.equal(w, '⏳ 잠시만요!');
+    assert.equal(r, '⏳ 잠시만요!');
+  });
+  // ★ 설치 함수는 편집기 선택 상자를 못 믿어 속성으로 실행한다 — 문서와 코드가 같은 값이어야 한다
+  t('설명서의 PENDING_SETUP 값이 코드에 다 있다', () => {
+    const SETUP_MD = fs.readFileSync(new URL('../SETUP.md', import.meta.url), 'utf8');
+    const doc = (SETUP_MD.match(/`PENDING_SETUP` \| `(\w+)`|〃 \| `(\w+)`/g) || [])
+      .map((x) => (x.match(/`(\w+)`$/) || [])[1]).filter(Boolean);
+    assert.equal(doc.length >= 4, true, '설명서에 값 목록이 없다');
+    const at = GS2.indexOf('function runPendingSetup_');
+    const body = GS2.slice(at, at + 900);
+    for (const v of doc) assert.equal(body.indexOf("'" + v + "'") !== -1, true, v + ' 를 코드가 모른다');
+  });
   t('대기조가 한 번 깨면 충분히 오래 살아 있다', () => {
     const idle = Number((RELAY_JS.match(/IDLE_MINUTES \|\| (\d+)/) || [])[1]);
     assert.equal(idle >= 20, true, `조용해지면 끄는 시간 ${idle}분은 너무 짧다`);
@@ -1669,6 +1706,225 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
       assert.equal(/invalidateModel_\(\)/.test(GS2.slice(at, at + 400)), true, fn + ' 에 캐시 버리기 없음');
     }
   });
+}
+
+// ═══════════════════════════════════════════════════════════
+// 12. 대량 입력 — 옆으로 나열하든 한 줄에 하나씩이든 (2026-09-05 에이든 지시)
+//   ★ 예전엔 조각 하나만 주소가 아니어도 메시지 전체를 조용히 버렸다.
+//     "붙여넣었는데 아무 반응이 없다"의 진짜 원인 — 그 회귀를 여기서 막는다.
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('n1.com n2.com n3.com'));
+  t('옆으로 나열: 어느 업체에 넣을지 묻는다', () => assert.equal(/주소 3개를 어느 업체에/.test(lastText(env)), true));
+  post(B, cbqLast(env, 'a:0'));
+  t('옆으로 나열: 고른 업체에 3개 다 들어간다', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, ['egg-1.com', 'egg-5.com', 'n1.com', 'n2.com', 'n3.com']));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('n1.com\nn2.com\nn3.com'));
+  post(B, cbqLast(env, 'a:1'));
+  t('한 줄에 하나씩: 그대로 다 들어간다', () =>
+    assert.deepEqual(B.loadModel_()[1].domains, ['ya-1.com', 'n1.com', 'n2.com', 'n3.com']));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('누드티비\nn1.com\nn2.com'));
+  t('맨 윗줄이 업체 이름이면 곧바로 그 업체에 넣는다', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, ['egg-1.com', 'egg-5.com', 'n1.com', 'n2.com']));
+  t('물어보지 않고 바로 결과를 준다', () => assert.equal(/2개 추가/.test(lastText(env)), true));
+}
+{
+  // ★ 회귀 방지 — 오타 하나 때문에 전부 사라지던 사고
+  const { env, B } = fresh(SEED);
+  post(B, msg('n1.com bb..com n2.com'));
+  t('오타가 섞여도 조용히 사라지지 않는다', () => assert.equal(/어느 업체에/.test(lastText(env)), true));
+  post(B, cbqLast(env, 'a:0'));
+  const after = B.loadModel_()[0].domains;
+  t('오타는 건너뛰고 나머지는 등록된다', () => {
+    assert.equal(after.indexOf('n1.com') !== -1, true);
+    assert.equal(after.indexOf('n2.com') !== -1, true);
+    assert.equal(after.length, 4);
+  });
+  t('건너뛴 것을 알려준다', () => assert.equal(/형식이 아님/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('추가 누드티비 n1.com n2.com n3.com'));
+  t('글 명령 한 줄로 여러 개 추가', () => assert.equal(B.loadModel_()[0].domains.length, 5));
+  post(B, msg('추가 파트너사\nn4.com\nn5.com'));
+  t('글 명령 + 줄바꿈 목록으로 여러 개 추가', () => assert.equal(B.loadModel_()[1].domains.length, 3));
+}
+{
+  const { env, B } = fresh([{ name: '우리 회사', domains: ['a.com'] }]);
+  post(B, msg('추가 우리 회사 z1.com z2.com'));
+  t('업체 이름에 띄어쓰기가 있어도 알아듣는다', () => {
+    const m = B.loadModel_();
+    assert.equal(m.length, 1);
+    assert.deepEqual(m[0].domains, ['a.com', 'z1.com', 'z2.com']);
+  });
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('삭제 egg-1.com egg-5.com'));
+  t('글 명령으로 여러 개 한 번에 삭제', () => assert.deepEqual(B.loadModel_()[0].domains, []));
+  t('대량 삭제도 되돌리기를 안내한다', () => assert.equal(/되돌리기/.test(lastText(env)), true));
+  post(B, cbq('undo'));
+  post(B, cbqLast(env, 'undook'));
+  t('대량 삭제를 한 번에 되돌린다(백업도 한 번만)', () =>
+    assert.deepEqual(B.loadModel_()[0].domains, ['egg-1.com', 'egg-5.com']));
+}
+{
+  const dup = [{ name: 'A', domains: ['same.com', 'a1.com'] }, { name: 'B', domains: ['same.com'] }];
+  const { env, B } = fresh(dup);
+  post(B, msg('삭제 same.com a1.com A'));
+  t('대량 삭제에 업체를 지정하면 그 업체에서만 지운다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m[0].domains, []);
+    assert.deepEqual(m[1].domains, ['same.com']);
+  });
+}
+{
+  const dup = [{ name: 'A', domains: ['same.com'] }, { name: 'B', domains: ['same.com', 'b1.com'] }];
+  const { env, B } = fresh(dup);
+  post(B, msg('삭제 same.com b1.com'));
+  t('여러 업체에 있는 주소는 지우지 않고 알려준다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m[0].domains, ['same.com']);
+    assert.deepEqual(m[1].domains, ['same.com']);
+    assert.equal(/여러 업체에 있음/.test(lastText(env)), true);
+  });
+}
+{
+  // 버튼만으로 여러 개 삭제 — 담당자는 버튼으로만 조작한다
+  const { env, B } = fresh([{ name: 'A', domains: ['a1.com', 'a2.com', 'a3.com', 'a4.com'] }]);
+  post(B, cbq('del'));
+  post(B, cbqLast(env, 'd:0'));
+  t('업체 화면에 [여러 개 한 번에] 버튼이 있다', () => {
+    const kb = lastSent(env).body.reply_markup.inline_keyboard;
+    assert.equal(JSON.stringify(kb).indexOf('"dm:0"') !== -1, true);
+  });
+  post(B, cbqLast(env, 'dm:0'));
+  t('버튼 대량삭제: 주소를 물어본다', () => assert.equal(/지울 주소를 보내주세요/.test(lastText(env)), true));
+  post(B, msg('a1.com a3.com'));
+  t('버튼 대량삭제: 지우기 전에 확인을 묻는다', () => {
+    assert.equal(/2개를 지울까요/.test(lastText(env)), true);
+    assert.equal(B.loadModel_()[0].domains.length, 4);
+  });
+  post(B, cbqLast(env, 'dmok'));
+  t('버튼 대량삭제: 확인 후 지워진다', () => assert.deepEqual(B.loadModel_()[0].domains, ['a2.com', 'a4.com']));
+}
+{
+  // 지난 확인 버튼(위로 스크롤해 누른 것)이 엉뚱하게 지우지 않는다
+  const { env, B } = fresh([{ name: 'A', domains: ['a1.com', 'a2.com'] }]);
+  post(B, cbq('del'));
+  post(B, cbqLast(env, 'd:0'));
+  post(B, cbqLast(env, 'dm:0'));
+  post(B, msg('a1.com'));
+  post(B, cbq('dmok', '-1001', 9));   // 옛 메시지의 버튼
+  t('지난 확인 버튼은 대량삭제도 막는다', () => {
+    assert.equal(/지난 확인 버튼/.test(lastText(env)), true);
+    assert.equal(B.loadModel_()[0].domains.length, 2);
+  });
+}
+{
+  const { env, B } = fresh([{ name: 'A', domains: ['a1.com', 'a2.com'] }, { name: 'B', domains: [] }]);
+  post(B, msg('이동 a1.com a2.com B'));
+  t('여러 개를 한 번에 다른 업체로 옮긴다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m[0].domains, []);
+    assert.deepEqual(m[1].domains, ['a1.com', 'a2.com']);
+  });
+}
+{
+  const { env, B } = fresh([{ name: 'A', domains: ['a1.com', 'a2.com'] }]);
+  post(B, msg('변경\na1.com x1.com\na2.com x2.com'));
+  t('여러 짝을 한 번에 갈아끼운다', () => assert.deepEqual(B.loadModel_()[0].domains, ['x1.com', 'x2.com']));
+  post(B, msg('변경 x1.com'));
+  t('짝이 안 맞으면 어떻게 쓰는지 알려준다', () => assert.equal(/짝<\/b>으로|짝/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('업체추가 가업체\n나업체\n다업체'));
+  t('업체를 한 줄에 하나씩 여러 곳 추가', () => assert.deepEqual(B.loadModel_().map((c) => c.name), ['누드티비', '파트너사', '가업체', '나업체', '다업체']));
+  t('업체 대량추가 결과를 줄줄이 알려준다', () => assert.equal(/3곳 추가/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh([{ name: 'A', domains: ['a.com'] }, { name: 'B', domains: ['b.com'] }, { name: 'C', domains: ['c.com'] }]);
+  post(B, msg('업체삭제 A\nC'));
+  t('업체 대량삭제도 확인을 먼저 묻는다', () => {
+    assert.equal(/2곳을 도메인 2개와 함께 삭제할까요/.test(lastText(env)), true);
+    assert.equal(B.loadModel_().length, 3);
+  });
+  post(B, cbqLast(env, 'codelok'));
+  t('확인 한 번으로 여러 업체가 지워진다', () => assert.deepEqual(B.loadModel_().map((c) => c.name), ['B']));
+}
+{
+  const { env, B } = fresh([{ name: 'A', domains: [] }, { name: 'B', domains: [] }]);
+  post(B, msg('이름변경 A 에이\nB 비이'));
+  t('업체 이름을 여러 개 한 번에 바꾼다', () => assert.deepEqual(B.loadModel_().map((c) => c.name), ['에이', '비이']));
+}
+{
+  // 대량 작업이 이력을 폭주시키지 않는다(한 줄로 남는다)
+  const { env, B } = fresh(SEED);
+  const addLogs = () => ((env.sheets.get('이력') || { rows: [] }).rows).filter((r) => r[2] === '도메인 추가');
+  post(B, msg('추가 누드티비 n1.com n2.com n3.com n4.com n5.com'));
+  t('대량 추가의 이력은 한 줄', () => assert.equal(addLogs().length, 1));
+  t('대량 추가 이력에 무엇을 넣었는지 다 남는다', () => assert.equal(/n1\.com, n2\.com, n3\.com, n4\.com, n5\.com/.test(addLogs()[0][3]), true));
+}
+{
+  // 채널 잡담에 끼어들지 않는다 — 대량 지원 때문에 수다에 반응하면 안 된다
+  const { env, B } = fresh(SEED);
+  env.sent.length = 0;
+  post(B, msg('오늘 점심 뭐 먹지'));
+  t('잡담에는 아무 말도 하지 않는다', () => assert.equal(env.sent.length, 0));
+  post(B, msg('egg-9.com 확인해줘'));
+  t('주소 하나 + 잡담도 조용히 넘긴다', () => assert.equal(env.sent.length, 0));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  post(B, cbqLast(env, 'a:0'));
+  post(B, msg('n1.com n2.com\nn3.com,n4.com'));
+  t('주소 입력 단계에서 띄어쓰기·줄바꿈·쉼표 섞여도 다 받는다', () =>
+    assert.equal(B.loadModel_()[0].domains.length, 6));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('co'));
+  post(B, cbqLast(env, 'coa'));
+  post(B, msg('가업체\n나업체'));
+  t('업체 이름 입력 단계에서도 여러 줄이면 여러 곳을 만든다', () =>
+    assert.deepEqual(B.loadModel_().map((c) => c.name), ['누드티비', '파트너사', '가업체', '나업체']));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  post(B, cbqLast(env, 'an'));
+  post(B, msg('새업체\nn1.com\nn2.com'));
+  t('새 업체 이름 + 주소를 한 번에 붙여넣어도 끝까지 간다', () => {
+    const m = B.loadModel_();
+    assert.equal(m.length, 3);
+    assert.deepEqual(m[2], { name: '새업체', domains: ['n1.com', 'n2.com'] });
+  });
+}
+{
+  // 한도(업체당 200개)를 넘겨도 앞부분은 살아남고, 넘친 것만 알려준다
+  const full = [];
+  for (let i = 0; i < 199; i++) full.push('f' + i + '.com');
+  const { env, B } = fresh([{ name: 'A', domains: full }]);
+  post(B, msg('추가 A over1.com over2.com over3.com'));
+  t('한도를 넘겨도 통째로 실패하지 않는다', () => assert.equal(B.loadModel_()[0].domains.length, 200));
+  t('한도 때문에 못 넣은 것을 알려준다', () => assert.equal(/최대 200개까지/.test(lastText(env)), true));
+}
+{
+  const many = [];
+  for (let i = 0; i < 100; i++) many.push('m' + i + '.com');
+  const { env, B } = fresh(SEED);
+  post(B, msg('추가 누드티비 ' + many.join(' ')));
+  t('수백 개를 넣어도 다 등록된다', () => assert.equal(B.loadModel_()[0].domains.length, 102));
+  t('답이 끝없이 길어지지 않게 줄인다', () => assert.equal(/외 70개/.test(lastText(env)), true));
 }
 
 // ═══════════════════════════════════════════════════════════

@@ -4,7 +4,7 @@
  *
  * 하는 일 (딱 두 가지)
  *   ① 텔레그램이 이 주소를 직접 두드리면 0.05초 안에 "받았다"를 돌려준다.
- *   ② 버튼이면 먼저 '⏳ 잠시만요'로 답해 주고(체감 0.1초),
+ *   ② 버튼이면 먼저 '⏳ 잠시만요!'로 답해 주고(체감 0.1초),
  *      그다음 구글 앱스스크립트(두뇌)에 넘겨 실제 처리를 시킨다.
  *
  * 왜 필요한가
@@ -74,7 +74,7 @@ async function handleUpdate(update, env) {
   const cb = update.callback_query;
   if (cb && cb.id) {
     preAnswered = true;
-    telegram(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ 잠시만요', cache_time: 0 })
+    telegram(env, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ 잠시만요!', cache_time: 0 })
       .catch(() => {});
   }
 

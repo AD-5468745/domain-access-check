@@ -780,11 +780,11 @@ function helpText_() {
     '목록                     전체 보기',
     '상태                     마지막 결과 다시 보기',
     '추가 누드티비 a.com b.com  업체에 주소 추가',
-    '삭제 a.com               주소 삭제',
+    '삭제 a.com b.com         주소 삭제(여러 개 가능)',
     '변경 a.com b.com         주소 갈아끼우기',
-    '이동 a.com 파트너사        다른 업체로 옮기기',
-    '업체추가 새업체',
-    '업체삭제 누드티비',
+    '이동 a.com b.com 파트너사  다른 업체로 옮기기',
+    '업체추가 새업체           (줄바꿈으로 여러 곳)',
+    '업체삭제 누드티비          (줄바꿈으로 여러 곳)',
     '이름변경 누드티비 누드티비2',
     '점검시각 9 21            매일 09시·21시로',
     '알림 문제만 / 알림 항상',
@@ -792,7 +792,18 @@ function helpText_() {
     '되돌리기                 직전 변경 취소</blockquote>',
     '',
     '<blockquote>주소는 https://·www·뒤 경로를 붙여도 알아서 정리됩니다.',
-    '여러 개는 줄바꿈이나 띄어쓰기로 한 번에 넣으세요.</blockquote>',
+    '여러 개는 줄바꿈·띄어쓰기·쉼표 아무거나로 한 번에 넣으세요.</blockquote>',
+    '',
+    '📦 <b>한 번에 여러 개</b>',
+    '',
+    '<blockquote>업체 이름을 맨 윗줄에 적고 그 아래에 주소를 붙여넣으면',
+    '그 업체로 한 번에 들어갑니다. 예)',
+    '누드티비',
+    'a.com',
+    'b.com',
+    '',
+    '업체 이름 없이 주소만 붙여넣으면 어느 업체에 넣을지 물어봅니다.',
+    '지울 때는 [🗑 도메인 삭제] → 업체 → [🗑 여러 개 한 번에]</blockquote>',
   ].join('\n');
 }
 
@@ -1011,6 +1022,234 @@ function checkTokenExpiry_() {
 // 동작 — 도메인·업체 편집
 // ═══════════════════════════════════════════════════════════════════
 /** 업체 이름 규칙 — 한 곳에서만 판단한다(추가 경로마다 달라지면 구멍이 생긴다) */
+// ═══════════════════════════════════════════════════════════════════
+// 대량 입력 — 여러 개를 한 번에 (2026-09-05)
+// ★ 담당자는 주소를 옆으로 죽 나열하기도 하고, 한 줄에 하나씩 붙여넣기도 한다.
+//   줄바꿈·띄어쓰기·쉼표·탭 어느 것으로 나눠도 똑같이 알아듣도록 한 곳에서 처리한다.
+//   예전엔 조각 하나만 주소가 아니어도 메시지 전체를 조용히 버렸다 —
+//   대량 붙여넣기에서 오타 하나 때문에 아무 반응이 없던 사고의 원인.
+// ═══════════════════════════════════════════════════════════════════
+/** 아무렇게나 붙여넣은 글을 조각으로 나눈다(줄바꿈·띄어쓰기·쉼표·세미콜론·탭). */
+function tokens_(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .split(/[\s,;]+/)
+    .map(function (x) { return String(x).trim(); })
+    .filter(function (x) { return !!x; });
+}
+
+/** 줄 단위로 나눈다(업체 이름처럼 띄어쓰기가 들어갈 수 있는 것용). */
+function lines_(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .split(/[\r\n]+/)
+    .map(function (x) { return String(x).trim(); })
+    .filter(function (x) { return !!x; });
+}
+
+/** 첫 줄만 (업체 이름을 물었는데 목록을 통째로 붙여넣는 경우 대비) */
+function firstLine_(text) {
+  var ls = lines_(text);
+  return ls.length ? ls[0] : String(text === null || text === undefined ? '' : text).trim();
+}
+
+/** '주소를 적으려던 것'인가 — 점이 있거나 http 로 시작하면 그렇게 본다. */
+function looksLikeDomain_(tok) {
+  var s = String(tok === null || tok === undefined ? '' : tok);
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s) || s.indexOf('.') !== -1;
+}
+
+/**
+ * 조각들을 셋으로 가른다.
+ *   ok    제대로 된 주소(중복 제거)
+ *   bad   주소를 적으려다 틀린 것 → '형식이 아님'으로 알려준다
+ *   words 그냥 말(업체 이름일 수도 있다)
+ */
+function splitTokens_(list) {
+  var ok = [], bad = [], words = [];
+  for (var i = 0; i < list.length; i++) {
+    var d = normalizeDomain_(list[i]);
+    if (d) { if (ok.indexOf(d) === -1) ok.push(d); continue; }
+    if (looksLikeDomain_(list[i])) bad.push(String(list[i]));
+    else words.push(String(list[i]));
+  }
+  return { ok: ok, bad: bad, words: words };
+}
+
+/**
+ * 앞쪽 조각들이 등록된 업체 이름과 맞는지 본다(띄어쓰기가 든 이름까지).
+ * '추가 우리 회사 a.com' 처럼 업체 이름에 공백이 있어도 알아듣게 한다.
+ */
+function pickLeadingCompany_(model, toks) {
+  for (var n = Math.min(toks.length, 5); n >= 1; n--) {
+    var name = toks.slice(0, n).join(' ');
+    if (findCompany_(model, name) !== -1) return { name: name, rest: toks.slice(n) };
+  }
+  return { name: toks.length ? toks[0] : '', rest: toks.slice(1) };
+}
+
+/** 결과 묶음을 담당자용 줄로 바꾼다(추가/삭제/이동/변경 공통). */
+function bulkLines_(head, groups) {
+  var lines = [head];
+  for (var g = 0; g < groups.length; g++) {
+    var mark = groups[g][0], items = groups[g][1];
+    for (var i = 0; i < items.length; i++) lines.push(mark + ' ' + esc_(String(items[i])));
+  }
+  return lines;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 동작 — 여러 개 한 번에 (자물쇠·백업·저장·기록을 한 번만 한다)
+// ═══════════════════════════════════════════════════════════════════
+function opRemoveDomains_(rawList, companyName, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var wanted = String(companyName === null || companyName === undefined ? '' : companyName).trim().toLowerCase();
+    var removed = [], missing = [], wrongCo = [], ambiguous = [], bad = [], touched = false;
+    for (var i = 0; i < rawList.length; i++) {
+      var d = normalizeDomain_(rawList[i]);
+      if (!d) { bad.push(String(rawList[i])); continue; }
+      var all = findDomain_(model, d);
+      if (!all.length) { missing.push(d); continue; }
+      var hits = all;
+      if (wanted) {
+        hits = all.filter(function (h) { return model[h.ci].name.trim().toLowerCase() === wanted; });
+        if (!hits.length) { wrongCo.push(d); continue; }
+      } else if (all.length > 1) {
+        ambiguous.push({ domain: d, names: all.map(function (h) { return model[h.ci].name; }) });
+        continue;
+      }
+      if (!touched) { snapshot_('삭제'); touched = true; }
+      var co = model[hits[0].ci];
+      co.domains.splice(hits[0].di, 1);
+      removed.push({ company: co.name, domain: d });
+    }
+    if (touched) {
+      saveModel_(model);
+      log_(actor, '도메인 삭제', removed.map(function (r) { return '〔' + r.company + '〕 ' + r.domain; }).join(', '));
+      sysWrite_();
+    }
+    return { removed: removed, missing: missing, wrongCo: wrongCo, ambiguous: ambiguous, bad: bad };
+  });
+}
+
+function opMoveDomains_(rawList, toCompany, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var ti = findCompany_(model, toCompany);
+    if (ti === -1) throw new Error('그런 업체가 없습니다: ' + toCompany);
+    var moved = [], missing = [], already = [], bad = [], touched = false;
+    for (var i = 0; i < rawList.length; i++) {
+      var d = normalizeDomain_(rawList[i]);
+      if (!d) { bad.push(String(rawList[i]) + ' (주소 형식이 아님)'); continue; }
+      var hits = findDomain_(model, d);
+      if (!hits.length) { missing.push(d); continue; }
+      if (hits[0].ci === ti) { already.push(d); continue; }
+      if (model[ti].domains.length >= MAX_DOMAINS_PER_CO) { bad.push(d + ' (한 업체에 최대 ' + MAX_DOMAINS_PER_CO + '개까지)'); continue; }
+      if (!touched) { snapshot_('이동'); touched = true; }
+      var from = model[hits[0].ci];
+      from.domains.splice(hits[0].di, 1);
+      if (model[ti].domains.indexOf(d) === -1) model[ti].domains.push(d);
+      moved.push({ domain: d, from: from.name });
+    }
+    var toName = model[ti].name;
+    if (touched) {
+      saveModel_(model);
+      log_(actor, '업체 이동', moved.map(function (v) { return v.domain + ' : 〔' + v.from + '〕 → 〔' + toName + '〕'; }).join(', '));
+      sysWrite_();
+    }
+    return { to: toName, moved: moved, missing: missing, already: already, bad: bad };
+  });
+}
+
+function opReplaceDomains_(pairs, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var changed = [], missing = [], bad = [], touched = false;
+    for (var i = 0; i < pairs.length; i++) {
+      var od = normalizeDomain_(pairs[i][0]);
+      var nd = normalizeDomain_(pairs[i][1]);
+      if (!od) { bad.push(String(pairs[i][0]) + ' (주소 형식이 아님)'); continue; }
+      if (!nd) { bad.push(String(pairs[i][1]) + ' (새 주소가 올바르지 않음)'); continue; }
+      var hits = findDomain_(model, od);
+      if (!hits.length) { missing.push(od); continue; }
+      if (!touched) { snapshot_('변경'); touched = true; }
+      var co = model[hits[0].ci];
+      if (co.domains.indexOf(nd) !== -1 && co.domains.indexOf(nd) !== hits[0].di) co.domains.splice(hits[0].di, 1);
+      else co.domains[hits[0].di] = nd;
+      changed.push({ company: co.name, from: od, to: nd });
+    }
+    if (touched) {
+      saveModel_(model);
+      log_(actor, '주소 변경', changed.map(function (c) { return '〔' + c.company + '〕 ' + c.from + ' → ' + c.to; }).join(', '));
+      sysWrite_();
+    }
+    return { changed: changed, missing: missing, bad: bad };
+  });
+}
+
+function opAddCompanies_(names, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var added = [], dup = [], bad = [], touched = false;
+    for (var i = 0; i < names.length; i++) {
+      var n = null;
+      try { n = validCompanyName_(names[i]); }
+      catch (e) { bad.push({ raw: String(names[i]), why: String(e.message || e) }); continue; }
+      if (findCompany_(model, n) !== -1) { dup.push(n); continue; }
+      if (model.length >= MAX_COMPANIES) { bad.push({ raw: n, why: '업체는 최대 ' + MAX_COMPANIES + '곳까지 등록할 수 있습니다.' }); continue; }
+      if (!touched) { snapshot_('업체추가'); touched = true; }
+      model.push({ name: n, domains: [] });
+      added.push(n);
+    }
+    if (touched) { saveModel_(model); log_(actor, '업체 추가', added.join(', ')); sysWrite_(); }
+    return { added: added, dup: dup, bad: bad };
+  });
+}
+
+function opRemoveCompanies_(names, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var removed = [], missing = [], touched = false;
+    for (var i = 0; i < names.length; i++) {
+      var ci = findCompany_(model, names[i]);
+      if (ci === -1) { missing.push(String(names[i])); continue; }
+      if (!touched) { snapshot_('업체삭제'); touched = true; }
+      var co = model.splice(ci, 1)[0];
+      removed.push({ name: co.name, count: co.domains.length, domains: co.domains });
+    }
+    if (touched) {
+      saveModel_(model);
+      log_(actor, '업체 삭제', removed.map(function (r) { return r.name + ' (도메인 ' + r.count + '개 함께 삭제)'; }).join(', '));
+      sysWrite_();
+    }
+    return { removed: removed, missing: missing };
+  });
+}
+
+function opRenameCompanies_(pairs, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var renamed = [], missing = [], bad = [], touched = false;
+    for (var i = 0; i < pairs.length; i++) {
+      var ci = findCompany_(model, pairs[i][0]);
+      if (ci === -1) { missing.push(String(pairs[i][0])); continue; }
+      var n = null;
+      try { n = validCompanyName_(pairs[i][1]); }
+      catch (e) { bad.push({ raw: String(pairs[i][1]), why: String(e.message || e) }); continue; }
+      if (findCompany_(model, n) !== -1) { bad.push({ raw: n, why: '이미 있는 이름입니다: ' + n }); continue; }
+      if (!touched) { snapshot_('이름변경'); touched = true; }
+      var prev = model[ci].name;
+      model[ci].name = n;
+      renamed.push({ from: prev, to: n });
+    }
+    if (touched) {
+      saveModel_(model);
+      log_(actor, '업체 이름변경', renamed.map(function (r) { return r.from + ' → ' + r.to; }).join(', '));
+      sysWrite_();
+    }
+    return { renamed: renamed, missing: missing, bad: bad };
+  });
+}
+
 function validCompanyName_(name) {
   var n = String(name === null || name === undefined ? '' : name).trim();
   if (!n) throw new Error('업체 이름을 적어주세요.');
@@ -1037,7 +1276,8 @@ function opAddDomains_(companyName, rawList, actor) {
       if (model[ci].domains.indexOf(d) !== -1) { dup.push(d); continue; }
       var other = findDomain_(model, d);
       if (other.length) moved.push(d + ' (〔' + model[other[0].ci].name + '〕에도 있음)');
-      if (model[ci].domains.length >= MAX_DOMAINS_PER_CO) throw new Error('한 업체에 최대 ' + MAX_DOMAINS_PER_CO + '개까지입니다.');
+      // ★ 한도를 넘으면 통째로 실패시키지 않는다 — 대량 등록에서 앞부분까지 날아가면 안 된다
+      if (model[ci].domains.length >= MAX_DOMAINS_PER_CO) { bad.push(String(rawList[i]) + ' (한 업체에 최대 ' + MAX_DOMAINS_PER_CO + '개까지)'); continue; }
       model[ci].domains.push(d);
       added.push(d);
     }
@@ -1051,114 +1291,53 @@ function opAddDomains_(companyName, rawList, actor) {
   });
 }
 
+// ── 한 개짜리 명령은 위 '여러 개' 동작을 그대로 쓴다(규칙이 두 벌이 되지 않게).
 function opRemoveDomain_(domain, companyName, actor) {
-  return withLock_(function () {
-    var model = loadModel_();
-    var hits = findDomain_(model, domain);
-    if (!hits.length) throw new Error('등록되지 않은 주소입니다: ' + domain);
-    if (companyName) {
-      hits = hits.filter(function (h) { return model[h.ci].name.trim().toLowerCase() === String(companyName).trim().toLowerCase(); });
-      if (!hits.length) throw new Error('〔' + companyName + '〕에는 그 주소가 없습니다.');
-    }
-    if (hits.length > 1) {
-      var names = hits.map(function (h) { return model[h.ci].name; });
-      throw new Error('여러 업체에 있습니다(' + names.join(', ') + '). 업체를 지정해 주세요: 삭제 ' + domain + ' ' + names[0]);
-    }
-    snapshot_('삭제');
-    var co = model[hits[0].ci];
-    var removed = co.domains.splice(hits[0].di, 1)[0];
-    saveModel_(model);
-    log_(actor, '도메인 삭제', '〔' + co.name + '〕 ' + removed);
-    sysWrite_();
-    return { company: co.name, domain: removed };
-  });
+  var r = opRemoveDomains_([domain], companyName, actor);
+  if (r.removed.length) return { company: r.removed[0].company, domain: r.removed[0].domain };
+  if (r.bad.length) throw new Error('주소 형식이 아닙니다: ' + r.bad[0]);
+  if (r.wrongCo.length) throw new Error('〔' + companyName + '〕에는 그 주소가 없습니다.');
+  if (r.ambiguous.length) {
+    var a = r.ambiguous[0];
+    throw new Error('여러 업체에 있습니다(' + a.names.join(', ') + '). 업체를 지정해 주세요: 삭제 ' + a.domain + ' ' + a.names[0]);
+  }
+  throw new Error('등록되지 않은 주소입니다: ' + domain);
 }
 
 function opReplaceDomain_(oldD, newD, actor) {
-  return withLock_(function () {
-    var model = loadModel_();
-    var hits = findDomain_(model, oldD);
-    if (!hits.length) throw new Error('등록되지 않은 주소입니다: ' + oldD);
-    var nd = normalizeDomain_(newD);
-    if (!nd) throw new Error('새 주소가 올바르지 않습니다: ' + newD);
-    snapshot_('변경');
-    var co = model[hits[0].ci];
-    var prev = co.domains[hits[0].di];
-    if (co.domains.indexOf(nd) !== -1 && co.domains.indexOf(nd) !== hits[0].di) {
-      co.domains.splice(hits[0].di, 1);
-    } else {
-      co.domains[hits[0].di] = nd;
-    }
-    saveModel_(model);
-    log_(actor, '주소 변경', '〔' + co.name + '〕 ' + prev + ' → ' + nd);
-    sysWrite_();
-    return { company: co.name, from: prev, to: nd };
-  });
+  var r = opReplaceDomains_([[oldD, newD]], actor);
+  if (r.changed.length) return { company: r.changed[0].company, from: r.changed[0].from, to: r.changed[0].to };
+  if (r.missing.length) throw new Error('등록되지 않은 주소입니다: ' + oldD);
+  if (!normalizeDomain_(oldD)) throw new Error('등록되지 않은 주소입니다: ' + oldD);
+  throw new Error('새 주소가 올바르지 않습니다: ' + newD);
 }
 
 function opMoveDomain_(domain, toCompany, actor) {
-  return withLock_(function () {
-    var model = loadModel_();
-    var hits = findDomain_(model, domain);
-    if (!hits.length) throw new Error('등록되지 않은 주소입니다: ' + domain);
-    var ti = findCompany_(model, toCompany);
-    if (ti === -1) throw new Error('그런 업체가 없습니다: ' + toCompany);
-    if (ti === hits[0].ci) throw new Error('이미 〔' + toCompany + '〕에 있습니다.');
-    snapshot_('이동');
-    var from = model[hits[0].ci];
-    var d = from.domains.splice(hits[0].di, 1)[0];
-    if (model[ti].domains.indexOf(d) === -1) model[ti].domains.push(d);
-    saveModel_(model);
-    log_(actor, '업체 이동', d + ' : 〔' + from.name + '〕 → 〔' + model[ti].name + '〕');
-    sysWrite_();
-    return { domain: d, from: from.name, to: model[ti].name };
-  });
+  var r = opMoveDomains_([domain], toCompany, actor);
+  if (r.moved.length) return { domain: r.moved[0].domain, from: r.moved[0].from, to: r.to };
+  if (r.already.length) throw new Error('이미 〔' + toCompany + '〕에 있습니다.');
+  if (r.bad.length) throw new Error('주소 형식이 아닙니다: ' + domain);
+  throw new Error('등록되지 않은 주소입니다: ' + domain);
 }
 
 function opAddCompany_(name, actor) {
-  return withLock_(function () {
-    var model = loadModel_();
-    var n = validCompanyName_(name);
-    if (findCompany_(model, n) !== -1) throw new Error('이미 있는 업체입니다: ' + n);
-    if (model.length >= MAX_COMPANIES) throw new Error('업체는 최대 ' + MAX_COMPANIES + '곳까지입니다.');
-    snapshot_('업체추가');
-    model.push({ name: n, domains: [] });
-    saveModel_(model);
-    log_(actor, '업체 추가', n);
-    sysWrite_();
-    return n;
-  });
+  var r = opAddCompanies_([name], actor);
+  if (r.added.length) return r.added[0];
+  if (r.dup.length) throw new Error('이미 있는 업체입니다: ' + r.dup[0]);
+  throw new Error(r.bad.length ? r.bad[0].why : '업체를 추가하지 못했습니다.');
 }
 
 function opRemoveCompany_(name, actor) {
-  return withLock_(function () {
-    var model = loadModel_();
-    var ci = findCompany_(model, name);
-    if (ci === -1) throw new Error('그런 업체가 없습니다: ' + name);
-    snapshot_('업체삭제');
-    var co = model.splice(ci, 1)[0];
-    saveModel_(model);
-    log_(actor, '업체 삭제', co.name + ' (도메인 ' + co.domains.length + '개 함께 삭제)');
-    sysWrite_();
-    return co;
-  });
+  var r = opRemoveCompanies_([name], actor);
+  if (!r.removed.length) throw new Error('그런 업체가 없습니다: ' + name);
+  return { name: r.removed[0].name, domains: r.removed[0].domains || [] };
 }
 
 function opRenameCompany_(oldName, newName, actor) {
-  return withLock_(function () {
-    var model = loadModel_();
-    var ci = findCompany_(model, oldName);
-    if (ci === -1) throw new Error('그런 업체가 없습니다: ' + oldName);
-    var n = validCompanyName_(newName);
-    if (findCompany_(model, n) !== -1) throw new Error('이미 있는 이름입니다: ' + n);
-    snapshot_('이름변경');
-    var prev = model[ci].name;
-    model[ci].name = n;
-    saveModel_(model);
-    log_(actor, '업체 이름변경', prev + ' → ' + n);
-    sysWrite_();
-    return { from: prev, to: n };
-  });
+  var r = opRenameCompanies_([[oldName, newName]], actor);
+  if (r.renamed.length) return { from: r.renamed[0].from, to: r.renamed[0].to };
+  if (r.missing.length) throw new Error('그런 업체가 없습니다: ' + oldName);
+  throw new Error(r.bad.length ? r.bad[0].why : '이름을 바꾸지 못했습니다.');
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1213,69 +1392,166 @@ function handleTextCommand_(chatId, text, actor) {
 
   if ((m = /^점검시각\s+(.+)$/.exec(t))) return applyHours_(chatId, m[1], actor);
 
-  if ((m = /^추가\s+(\S+)\s+([\s\S]+)$/.exec(t))) {
-    return doAdd_(chatId, m[1], m[2].split(/[\s,]+/), actor);
+  // ── 도메인 추가 — 주소는 몇 개든, 옆으로 나열하든 한 줄에 하나씩이든 된다
+  if ((m = /^추가\s+([\s\S]+)$/.exec(t))) {
+    var addToks = tokens_(m[1]);
+    var lead = pickLeadingCompany_(loadModel_(), addToks);
+    if (!lead.rest.length) {
+      return tgSend_(chatId, '❌ 넣을 주소도 함께 적어주세요.\n\n<blockquote>예) 추가 누드티비 a.com b.com c.com\n여러 개는 띄어쓰기·쉼표·줄바꿈 아무거나 됩니다.</blockquote>', kbMain_());
+    }
+    return doAdd_(chatId, lead.name, lead.rest, actor);
   }
-  if ((m = /^삭제\s+(\S+)(?:\s+(\S+))?$/.exec(t))) {
+
+  // ── 도메인 삭제 — 한 개든 여러 개든. 주소가 아닌 말 하나는 업체 이름으로 본다
+  if ((m = /^삭제\s+([\s\S]+)$/.exec(t))) {
+    var dsp = splitTokens_(tokens_(m[1]));
+    var dCo = dsp.words.join(' ');
+    var dList = dsp.ok.concat(dsp.bad);
+    if (!dList.length) {
+      return tgSend_(chatId, '❌ 지울 주소를 적어주세요.\n\n<blockquote>예) 삭제 a.com\n여러 개: 삭제 a.com b.com c.com (줄바꿈도 됩니다)</blockquote>', kbMain_());
+    }
+    if (dList.length === 1) {
+      try {
+        var r1 = opRemoveDomain_(dList[0], dCo, actor);
+        return tgSend_(chatId, '✅ 삭제됨 — 〔' + esc_(r1.company) + '〕 ' + esc_(r1.domain) + '\n\n<blockquote>잘못 지웠으면 [되돌리기]</blockquote>', kbMain_());
+      } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+    }
+    return doDelMany_(chatId, dList, dCo, actor);
+  }
+
+  // ── 주소 변경 — 짝(옛 주소 새 주소)으로. 한 줄에 한 짝씩 여러 줄도 된다
+  if ((m = /^변경\s+([\s\S]+)$/.exec(t))) {
+    var cToks = tokens_(m[1]);
+    if (cToks.length < 2 || cToks.length % 2 !== 0) {
+      return tgSend_(chatId, '❌ 바꿀 주소와 새 주소를 <b>짝</b>으로 적어주세요.\n\n<blockquote>변경 a.com b.com\n\n여러 개면 한 줄에 한 짝씩:\n변경\na.com b.com\nc.com d.com</blockquote>', kbMain_());
+    }
+    var cPairs = [];
+    for (var cp = 0; cp < cToks.length; cp += 2) cPairs.push([cToks[cp], cToks[cp + 1]]);
+    if (cPairs.length === 1) {
+      try {
+        var rc = opReplaceDomain_(cPairs[0][0], cPairs[0][1], actor);
+        return tgSend_(chatId, '✅ 〔' + esc_(rc.company) + '〕 ' + esc_(rc.from) + ' → ' + esc_(rc.to), kbMain_());
+      } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+    }
     try {
-      var r = opRemoveDomain_(m[1], m[2] || '', actor);
-      return tgSend_(chatId, '✅ 삭제됨 — 〔' + esc_(r.company) + '〕 ' + esc_(r.domain) + '\n\n<blockquote>잘못 지웠으면 [되돌리기]</blockquote>', kbMain_());
-    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
-  }
-  if ((m = /^변경\s+(\S+)\s+(\S+)$/.exec(t))) {
-    try {
-      var rc = opReplaceDomain_(m[1], m[2], actor);
-      return tgSend_(chatId, '✅ 〔' + esc_(rc.company) + '〕 ' + esc_(rc.from) + ' → ' + esc_(rc.to), kbMain_());
-    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
-  }
-  if ((m = /^이동\s+(\S+)\s+(\S+)$/.exec(t))) {
-    try {
-      var rm = opMoveDomain_(m[1], m[2], actor);
-      return tgSend_(chatId, '✅ ' + esc_(rm.domain) + ' : 〔' + esc_(rm.from) + '〕 → 〔' + esc_(rm.to) + '〕', kbMain_());
-    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
-  }
-  if ((m = /^업체추가\s+(.+)$/.exec(t))) {
-    try { return tgSend_(chatId, '✅ 업체 〔' + esc_(opAddCompany_(m[1], actor)) + '〕 추가됨', kbMain_()); }
-    catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
-  }
-  if ((m = /^업체삭제\s+(.+)$/.exec(t))) {
-    var model0 = loadModel_();
-    var ci0 = findCompany_(model0, m[1]);
-    if (ci0 === -1) return tgSend_(chatId, '❌ 그런 업체가 없습니다: ' + esc_(m[1]), kbMain_());
-    var tsent = tgSend_(chatId,
-      '🗑 업체 〔' + esc_(model0[ci0].name) + '〕 를 도메인 ' + model0[ci0].domains.length + '개와 함께 삭제할까요?',
-      { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
-    setState_(chatId, { op: 'codel-confirm', name: model0[ci0].name, by: actor, at: Date.now(), mid: sentMid_(tsent) });
-    return tsent;
-  }
-  if ((m = /^이름변경\s+(\S+)\s+(.+)$/.exec(t))) {
-    try {
-      var rr = opRenameCompany_(m[1], m[2], actor);
-      return tgSend_(chatId, '✅ 업체 이름 변경 — 〔' + esc_(rr.from) + '〕 → 〔' + esc_(rr.to) + '〕', kbMain_());
+      var rcm = opReplaceDomains_(cPairs, actor);
+      var cl = bulkLines_('✅ 주소 ' + rcm.changed.length + '개 변경', [
+        ['↔', rcm.changed.map(function (x) { return '〔' + x.company + '〕 ' + x.from + ' → ' + x.to; })],
+        ['⚠️', rcm.missing.map(function (x) { return x + ' (등록되지 않은 주소)'; })],
+        ['⚠️', rcm.bad],
+      ]);
+      return tgSend_(chatId, '<blockquote>' + cl.join('\n') + '</blockquote>\n\n<blockquote>잘못됐으면 [되돌리기]</blockquote>', kbMain_());
     } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
   }
 
-  // 주소만 덜렁 보낸 경우 → 어디에 추가할지 물어봄 (여러 줄로 붙여넣은 경우도 포함)
-  var pieces = t.split(/[\s,]+/).filter(function (x) { return !!x; });
-  var picked = [], allDomains = pieces.length > 0;
-  for (var pi = 0; pi < pieces.length; pi++) {
-    var nd = normalizeDomain_(pieces[pi]);
-    if (!nd) { allDomains = false; break; }
-    picked.push(nd);
-  }
-  if (allDomains) {
-    var model1 = loadModel_();
-    if (!model1.length) {
-      setState_(chatId, { op: 'add-pick-newco', domains: pieces, by: actor, at: Date.now() });
-      return tgSend_(chatId, '🏢 등록된 업체가 없습니다. 이 주소를 넣을 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
+  // ── 업체 이동 — 주소 여러 개 + 맨 뒤에 옮겨갈 업체 이름
+  if ((m = /^이동\s+([\s\S]+)$/.exec(t))) {
+    var vToks = tokens_(m[1]);
+    var vsp = splitTokens_(vToks);
+    var vCo = vsp.words.join(' ');
+    var vList = vsp.ok.concat(vsp.bad);
+    // 업체 이름이 주소처럼 생긴 경우(드묾) — 맨 뒤 조각을 업체로 본다
+    if (!vCo && vToks.length >= 2) {
+      vCo = vToks[vToks.length - 1];
+      vList = splitTokens_(vToks.slice(0, vToks.length - 1)).ok;
     }
-    setState_(chatId, { op: 'add-pick-company', domains: pieces, by: actor, at: Date.now() });
-    var head1 = picked.length === 1
-      ? '➕ <b>' + esc_(picked[0]) + '</b> 을(를) 어느 업체에 추가할까요?'
-      : '➕ 주소 ' + picked.length + '개를 어느 업체에 추가할까요?\n\n<blockquote>' +
-        picked.slice(0, 10).map(esc_).join('\n') +
-        (picked.length > 10 ? '\n외 ' + (picked.length - 10) + '개' : '') + '</blockquote>';
-    return tgSend_(chatId, head1, kbCompanies_(model1, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
+    if (!vCo || !vList.length) {
+      return tgSend_(chatId, '❌ 옮길 주소와 업체를 적어주세요.\n\n<blockquote>이동 a.com 파트너사\n여러 개: 이동 a.com b.com 파트너사</blockquote>', kbMain_());
+    }
+    if (vList.length === 1) {
+      try {
+        var rm = opMoveDomain_(vList[0], vCo, actor);
+        return tgSend_(chatId, '✅ ' + esc_(rm.domain) + ' : 〔' + esc_(rm.from) + '〕 → 〔' + esc_(rm.to) + '〕', kbMain_());
+      } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+    }
+    try {
+      var rmm = opMoveDomains_(vList, vCo, actor);
+      var vl = bulkLines_('✅ 〔' + esc_(rmm.to) + '〕 로 ' + rmm.moved.length + '개 이동', [
+        ['→', rmm.moved.map(function (x) { return x.domain + ' (〔' + x.from + '〕에서)'; })],
+        ['⏭', rmm.already.map(function (x) { return x + ' (이미 이 업체)'; })],
+        ['⚠️', rmm.missing.map(function (x) { return x + ' (등록되지 않은 주소)'; })],
+        ['⚠️', rmm.bad],
+      ]);
+      return tgSend_(chatId, '<blockquote>' + vl.join('\n') + '</blockquote>', kbMain_());
+    } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+
+  // ── 업체 추가 — 한 줄에 한 업체씩 여러 개도 된다(이름에 띄어쓰기가 있을 수 있으므로 '줄' 기준)
+  if ((m = /^업체추가\s+([\s\S]+)$/.exec(t))) {
+    var coNames = lines_(m[1]);
+    if (coNames.length <= 1) {
+      try { return tgSend_(chatId, '✅ 업체 〔' + esc_(opAddCompany_(coNames[0] || m[1], actor)) + '〕 추가됨', kbMain_()); }
+      catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+    }
+    var rac = opAddCompanies_(coNames, actor);
+    var al = bulkLines_('✅ 업체 ' + rac.added.length + '곳 추가', [
+      ['+', rac.added],
+      ['⏭', rac.dup.map(function (x) { return x + ' (이미 있음)'; })],
+      ['⚠️', rac.bad.map(function (x) { return x.raw + ' (' + x.why + ')'; })],
+    ]);
+    return tgSend_(chatId, '<blockquote>' + al.join('\n') + '</blockquote>', kbMain_());
+  }
+
+  // ── 업체 삭제 — 한 줄에 한 업체씩. 도메인이 함께 지워지므로 반드시 확인을 묻는다
+  if ((m = /^업체삭제\s+([\s\S]+)$/.exec(t))) {
+    var delNames = lines_(m[1]);
+    if (!delNames.length) delNames = [String(m[1]).trim()];
+    return askCompanyDelete_(chatId, delNames, actor);
+  }
+
+  // ── 업체 이름변경 — 한 줄에 '옛이름 새이름' 한 짝씩
+  if ((m = /^이름변경\s+([\s\S]+)$/.exec(t))) {
+    var nLines = lines_(m[1]);
+    var nPairs = [];
+    for (var nl = 0; nl < nLines.length; nl++) {
+      var seg = nLines[nl].split(/\s+/).filter(Boolean);
+      if (seg.length >= 2) nPairs.push([seg[0], seg.slice(1).join(' ')]);
+    }
+    if (!nPairs.length) {
+      return tgSend_(chatId, '❌ 옛 이름과 새 이름을 적어주세요.\n\n<blockquote>이름변경 누드티비 누드티비2\n여러 개면 한 줄에 한 짝씩</blockquote>', kbMain_());
+    }
+    if (nPairs.length === 1) {
+      try {
+        var rr = opRenameCompany_(nPairs[0][0], nPairs[0][1], actor);
+        return tgSend_(chatId, '✅ 업체 이름 변경 — 〔' + esc_(rr.from) + '〕 → 〔' + esc_(rr.to) + '〕', kbMain_());
+      } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+    }
+    var rnm = opRenameCompanies_(nPairs, actor);
+    var nlz = bulkLines_('✅ 업체 이름 ' + rnm.renamed.length + '개 변경', [
+      ['↔', rnm.renamed.map(function (x) { return '〔' + x.from + '〕 → 〔' + x.to + '〕'; })],
+      ['⚠️', rnm.missing.map(function (x) { return x + ' (그런 업체가 없음)'; })],
+      ['⚠️', rnm.bad.map(function (x) { return x.raw + ' (' + x.why + ')'; })],
+    ]);
+    return tgSend_(chatId, '<blockquote>' + nlz.join('\n') + '</blockquote>', kbMain_());
+  }
+
+  // ── 주소만 덜렁 보낸 경우 → 어디에 추가할지 물어본다
+  //   ① 주소만 왔다(오타 섞여도 됨) → 목록으로 본다
+  //   ② 섞인 말이 '등록된 업체 이름' 하나면 → 그 업체에 바로 넣는다
+  //      (담당자가 업체명을 맨 윗줄에 적고 아래에 주소를 붙여넣는 실제 습관)
+  //   ③ 말이 섞였지만 주소가 2개 이상 → 주소만 골라 어디에 넣을지 묻는다
+  //   그 밖(주소 1개 + 잡담 등)은 예전처럼 조용히 넘긴다 — 채널 대화에 끼어들지 않기 위해
+  var bulk = splitTokens_(tokens_(t));
+  var bulkList = bulk.ok.concat(bulk.bad);
+  if (bulk.ok.length) {
+    var model1 = loadModel_();
+    var wordText = bulk.words.join(' ');
+    var coHit = wordText ? findCompany_(model1, wordText) : -1;
+    if (coHit !== -1) return doAdd_(chatId, model1[coHit].name, bulkList, actor);
+    if (!bulk.words.length || bulk.ok.length >= 2) {
+      if (!model1.length) {
+        setState_(chatId, { op: 'add-pick-newco', domains: bulkList, by: actor, at: Date.now() });
+        return tgSend_(chatId, '🏢 등록된 업체가 없습니다. 이 주소를 넣을 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
+      }
+      setState_(chatId, { op: 'add-pick-company', domains: bulkList, by: actor, at: Date.now() });
+      var head1 = bulk.ok.length === 1 && !bulk.bad.length
+        ? '➕ <b>' + esc_(bulk.ok[0]) + '</b> 을(를) 어느 업체에 추가할까요?'
+        : '➕ 주소 ' + bulk.ok.length + '개를 어느 업체에 추가할까요?\n\n<blockquote>' +
+          bulk.ok.slice(0, 15).map(esc_).join('\n') +
+          (bulk.ok.length > 15 ? '\n외 ' + (bulk.ok.length - 15) + '개' : '') +
+          (bulk.bad.length ? '\n\n⚠️ 주소 형식이 아닌 것 ' + bulk.bad.length + '개는 건너뜁니다' : '') + '</blockquote>';
+      return tgSend_(chatId, head1, kbCompanies_(model1, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
+    }
   }
 
   return null;   // 모르는 말은 조용히 무시(채널에 잡담이 오갈 수 있으므로)
@@ -1317,11 +1593,18 @@ function applyHours_(chatId, raw, actor) {
 function doAdd_(chatId, company, rawList, actor) {
   try {
     var r = opAddDomains_(company, rawList, actor);
-    var lines = ['✅ 〔' + esc_(r.company) + '〕 ' + r.added.length + '개 추가'];
-    for (var i = 0; i < r.added.length; i++) lines.push('+ ' + esc_(r.added[i]));
-    for (var j = 0; j < r.dup.length; j++) lines.push('⏭ ' + esc_(r.dup[j]) + ' (이미 있음)');
-    for (var k = 0; k < r.bad.length; k++) lines.push('⚠️ ' + esc_(r.bad[k]) + ' (주소 형식이 아님)');
-    for (var n = 0; n < r.moved.length; n++) lines.push('ℹ️ ' + esc_(r.moved[n]));
+    // ★ 수백 개를 붙여넣어도 답이 끝없이 길어지지 않게 각 묶음을 30줄로 자른다.
+    var cap = function (arr, tail) {
+      var out = arr.slice(0, 30).map(function (x) { return x + (tail || ''); });
+      if (arr.length > 30) out.push('… 외 ' + (arr.length - 30) + '개');
+      return out;
+    };
+    var lines = bulkLines_('✅ 〔' + esc_(r.company) + '〕 ' + r.added.length + '개 추가', [
+      ['+', cap(r.added)],
+      ['⏭', cap(r.dup, ' (이미 있음)')],
+      ['⚠️', cap(r.bad, ' (주소 형식이 아님)')],
+      ['ℹ️', cap(r.moved)],
+    ]);
     clearState_(chatId);
     var kb = r.added.length
       ? { inline_keyboard: [[{ text: '🔍 지금 점검', callback_data: 'run' }, { text: '◀️ 메뉴로', callback_data: 'm' }]] }
@@ -1331,6 +1614,49 @@ function doAdd_(chatId, company, rawList, actor) {
     clearState_(chatId);
     return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_());
   }
+}
+
+/** 여러 개를 한 번에 지운다(글 명령·버튼 공용). mid 가 있으면 버튼 응답으로 답한다. */
+function doDelMany_(chatId, list, company, actor, mid) {
+  var say = function (text, kb) { return mid ? tgReply_(chatId, mid, text, kb) : tgSend_(chatId, text, kb); };
+  try {
+    var r = opRemoveDomains_(list, company, actor);
+    var lines = bulkLines_('✅ ' + r.removed.length + '개 삭제' + (company ? ' — 〔' + esc_(company) + '〕' : ''), [
+      ['−', r.removed.map(function (x) { return '〔' + x.company + '〕 ' + x.domain; })],
+      ['⚠️', r.missing.map(function (x) { return x + ' (등록되지 않은 주소)'; })],
+      ['⚠️', r.wrongCo.map(function (x) { return x + ' (그 업체엔 없음)'; })],
+      ['⚠️', r.ambiguous.map(function (x) { return x.domain + ' (여러 업체에 있음: ' + x.names.join(', ') + ')'; })],
+      ['⚠️', r.bad.map(function (x) { return x + ' (주소 형식이 아님)'; })],
+    ]);
+    clearState_(chatId);
+    return say('<blockquote>' + lines.join('\n') + '</blockquote>\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+  } catch (e) {
+    clearState_(chatId);
+    return say('❌ ' + esc_(String(e.message || e)), kbMain_());
+  }
+}
+
+/** 업체 삭제 확인을 묻는다(한 곳이든 여러 곳이든). 도메인이 함께 지워지므로 항상 확인한다. */
+function askCompanyDelete_(chatId, names, actor, mid) {
+  var say = function (text, kb) { return mid ? tgReply_(chatId, mid, text, kb) : tgSend_(chatId, text, kb); };
+  var model = loadModel_();
+  var found = [], missing = [], total = 0, list = [];
+  for (var i = 0; i < names.length; i++) {
+    var ci = findCompany_(model, names[i]);
+    if (ci === -1) { missing.push(String(names[i])); continue; }
+    if (found.indexOf(model[ci].name) !== -1) continue;
+    found.push(model[ci].name);
+    total += model[ci].domains.length;
+    list.push('〔' + esc_(model[ci].name) + '〕 도메인 ' + model[ci].domains.length + '개');
+  }
+  if (!found.length) return say('❌ 그런 업체가 없습니다: ' + esc_(names.join(', ')), kbMain_());
+  var head = found.length === 1
+    ? '🗑 업체 〔' + esc_(found[0]) + '〕 를 도메인 ' + total + '개와 함께 삭제할까요?'
+    : '🗑 업체 ' + found.length + '곳을 도메인 ' + total + '개와 함께 삭제할까요?\n\n<blockquote>' + list.join('\n') + '</blockquote>';
+  if (missing.length) head += '\n\n<blockquote>⚠️ 없는 업체는 건너뜁니다: ' + esc_(missing.join(', ')) + '</blockquote>';
+  var sent = say(head, { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
+  setState_(chatId, { op: 'codel-confirm', names: found, name: found[0], by: actor, at: Date.now(), mid: sentMid_(sent) });
+  return sent;
 }
 
 function askUndo_(chatId) {
@@ -1344,30 +1670,65 @@ function askUndo_(chatId) {
 // 대화 중 입력 받기
 function handleStateInput_(chatId, st, text, actor) {
   if (st.op === 'add-input') {
-    var list = String(text).split(/[\s,\n]+/).filter(Boolean);
-    return doAdd_(chatId, st.company, list, actor);
+    // 옆으로 나열하든 한 줄에 하나씩이든 똑같이 받는다
+    return doAdd_(chatId, st.company, tokens_(text), actor);
   }
   if (st.op === 'add-newco') {
-    setState_(chatId, { op: 'add-input', company: String(text).trim(), by: actor, at: Date.now() });
-    return tgSend_(chatId, '➕ 〔' + esc_(String(text).trim()) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에. (취소: 취소)</blockquote>');
+    // 업체 이름만 적을 수도 있고, 첫 줄에 업체·다음 줄부터 주소를 한꺼번에 붙여넣을 수도 있다
+    var nls = lines_(text);
+    var coName = nls.length ? nls[0] : String(text).trim();
+    if (nls.length > 1) {
+      var rest = splitTokens_(tokens_(nls.slice(1).join(' ')));
+      if (rest.ok.length) { clearState_(chatId); return doAdd_(chatId, coName, rest.ok.concat(rest.bad), actor); }
+    }
+    setState_(chatId, { op: 'add-input', company: coName, by: actor, at: Date.now() });
+    return tgSend_(chatId, '➕ 〔' + esc_(coName) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈이나 띄어쓰기로 한 번에. (취소: 취소)</blockquote>');
   }
   if (st.op === 'add-pick-newco') {
     clearState_(chatId);
-    return doAdd_(chatId, String(text).trim(), st.domains, actor);
+    return doAdd_(chatId, firstLine_(text), st.domains, actor);
   }
   if (st.op === 'add-pick-company') {
     // 버튼 대신 업체 이름을 글로 적은 경우 — 예전엔 여기서 조용히 사라졌다
     clearState_(chatId);
-    return doAdd_(chatId, String(text).trim(), st.domains, actor);
+    return doAdd_(chatId, firstLine_(text), st.domains, actor);
+  }
+  if (st.op === 'del-input') {
+    // 여러 개 한 번에 삭제 — 지우기 전에 무엇을 지울지 보여주고 확인받는다
+    var dsp = splitTokens_(tokens_(text));
+    if (!dsp.ok.length) {
+      clearState_(chatId);
+      return tgSend_(chatId, '❌ 주소를 못 알아들었습니다.\n\n<blockquote>다시 [🗑 도메인 삭제] 부터 해주세요.</blockquote>', kbMain_());
+    }
+    var dHead = '🗑 〔' + esc_(st.company) + '〕 에서 ' + dsp.ok.length + '개를 지울까요?\n\n<blockquote>' +
+      dsp.ok.slice(0, 20).map(esc_).join('\n') +
+      (dsp.ok.length > 20 ? '\n… 외 ' + (dsp.ok.length - 20) + '개' : '') +
+      (dsp.bad.length ? '\n\n⚠️ 주소 형식이 아닌 ' + dsp.bad.length + '개는 건너뜁니다' : '') + '</blockquote>';
+    var dSent = tgSend_(chatId, dHead,
+      { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'dmok' }, { text: '아니오', callback_data: 'x' }]] });
+    setState_(chatId, { op: 'del-multi-confirm', company: st.company, domains: dsp.ok, by: actor, at: Date.now(), mid: sentMid_(dSent) });
+    return dSent;
   }
   if (st.op === 'co-add') {
-    var newName = String(text).trim();
+    var nameLines = lines_(text);
+    // 업체 여러 곳을 한 줄에 하나씩 붙여넣은 경우
+    if (!st.thenAdd && nameLines.length > 1) {
+      clearState_(chatId);
+      var rac = opAddCompanies_(nameLines, actor);
+      var acl = bulkLines_('✅ 업체 ' + rac.added.length + '곳 추가', [
+        ['+', rac.added],
+        ['⏭', rac.dup.map(function (x) { return x + ' (이미 있음)'; })],
+        ['⚠️', rac.bad.map(function (x) { return x.raw + ' (' + x.why + ')'; })],
+      ]);
+      return tgSend_(chatId, '<blockquote>' + acl.join('\n') + '</blockquote>', kbMain_());
+    }
+    var newName = firstLine_(text);
     try {
       var made = opAddCompany_(newName, actor);
       if (st.thenAdd) {
         // 업체가 하나도 없을 때 [➕ 도메인 추가]로 들어온 경우 — 만들고 끝내면 안 되고 주소까지 이어받아야 한다
         setState_(chatId, { op: 'add-input', company: made, by: actor, at: Date.now() });
-        return tgSend_(chatId, '✅ 업체 〔' + esc_(made) + '〕 추가됨\n\n➕ 이제 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에. (취소: 취소)</blockquote>');
+        return tgSend_(chatId, '✅ 업체 〔' + esc_(made) + '〕 추가됨\n\n➕ 이제 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈이나 띄어쓰기로 한 번에. (취소: 취소)</blockquote>');
       }
       clearState_(chatId);
       return tgSend_(chatId, '✅ 업체 〔' + esc_(made) + '〕 추가됨', kbMain_());
@@ -1379,14 +1740,14 @@ function handleStateInput_(chatId, st, text, actor) {
   if (st.op === 'co-rename') {
     clearState_(chatId);
     try {
-      var rr = opRenameCompany_(st.name, text, actor);
+      var rr = opRenameCompany_(st.name, firstLine_(text), actor);
       return tgSend_(chatId, '✅ 〔' + esc_(rr.from) + '〕 → 〔' + esc_(rr.to) + '〕', kbMain_());
     } catch (e) { return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
   }
   if (st.op === 'cfg-hours') return applyHours_(chatId, text, actor);
 
   // 확인(예/아니오)을 기다리는 중에 다른 말을 쓴 경우 — 예전엔 아무 말 없이 절차가 사라졌다
-  if (st.op === 'del-confirm' || st.op === 'codel-confirm') {
+  if (st.op === 'del-confirm' || st.op === 'codel-confirm' || st.op === 'del-multi-confirm') {
     clearState_(chatId);
     return tgSend_(chatId, '확인을 기다리다 취소했습니다.\n\n<blockquote>버튼을 누르지 않고 다른 말을 쓰면 취소됩니다.\n다시 하시려면 [🗑 도메인 삭제]</blockquote>', kbMain_());
   }
@@ -1411,7 +1772,7 @@ function handleCallback_(cb) {
   var head = parts[0];
 
   // 다른 담당자가 절차를 진행 중이면 새 절차 시작을 막는다(입력이 섞이는 사고 방지)
-  if (['add', 'del', 'coa', 'cor', 'cod', 'cfgh', 'dx', 'codp', 'corp'].indexOf(head) !== -1) {
+  if (['add', 'del', 'coa', 'cor', 'cod', 'cfgh', 'dx', 'dm', 'codp', 'corp'].indexOf(head) !== -1) {
     var busy = busyBy_(chatId, actor);
     if (busy) return tgReply_(chatId, mid, busy, kbMain_());
   }
@@ -1470,11 +1831,12 @@ function handleCallback_(cb) {
     var rows = [];
     for (var i = 0; i < model[di].domains.length; i++) {
       rows.push([{ text: '🗑 ' + model[di].domains[i], callback_data: 'dx:' + di + ':' + i }]);
-      if (rows.length >= 40) break;
+      if (rows.length >= 39) break;   // + [여러 개 한 번에] + [메뉴로] = 41줄(텔레그램 여유)
     }
+    rows.push([{ text: '🗑 여러 개 한 번에', callback_data: 'dm:' + di }]);
     rows.push([{ text: '◀️ 메뉴로', callback_data: 'm' }]);
-    var over = model[di].domains.length - rows.length + 1;
-    var note = over > 0 ? '\n\n<blockquote>주소가 많아 앞 40개만 보여드립니다.\n나머지는 <b>삭제 example.com</b> 처럼 주소를 직접 적어주세요.</blockquote>' : '';
+    var over = model[di].domains.length - rows.length + 2;
+    var note = over > 0 ? '\n\n<blockquote>주소가 많아 앞 39개만 보여드립니다.\n나머지는 [🗑 여러 개 한 번에] 로 붙여넣거나 <b>삭제 a.com b.com</b> 처럼 적어주세요.</blockquote>' : '';
     return tgReply_(chatId, mid, '🗑 〔' + esc_(model[di].name) + '〕 에서 지울 주소를 고르세요.' + note, { inline_keyboard: rows });
   }
   if (head === 'dx') {
@@ -1498,6 +1860,20 @@ function handleCallback_(cb) {
       var rd = opRemoveDomain_(std.domain, std.company, actor);
       return tgReply_(chatId, mid, '✅ 삭제됨 — 〔' + esc_(rd.company) + '〕 ' + esc_(rd.domain) + '\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
     } catch (e) { return tgReply_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+  }
+
+  if (head === 'dm') {
+    var mi = Number(parts[1]);
+    if (!model[mi]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    setState_(chatId, { op: 'del-input', company: model[mi].name, by: actor, at: Date.now() });
+    return tgReply_(chatId, mid, '🗑 〔' + esc_(model[mi].name) + '〕 에서 지울 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈이나 띄어쓰기로 한 번에.\n예) a.com b.com   또는 한 줄에 하나씩\n(취소: 취소)</blockquote>');
+  }
+  if (head === 'dmok') {
+    var stm = getState_(chatId);
+    clearState_(chatId);
+    if (!stm || stm.op !== 'del-multi-confirm') return tgReply_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
+    if (stm.mid && stm.mid !== mid) return tgReply_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
+    return doDelMany_(chatId, stm.domains, stm.company || '', actor, mid);
   }
 
   if (head === 'co') {
@@ -1529,10 +1905,7 @@ function handleCallback_(cb) {
   if (head === 'codp') {
     var xi = Number(parts[1]);
     if (!model[xi]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
-    var csent = tgReply_(chatId, mid, '🗑 업체 〔' + esc_(model[xi].name) + '〕 를 도메인 ' + model[xi].domains.length + '개와 함께 삭제할까요?',
-      { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
-    setState_(chatId, { op: 'codel-confirm', name: model[xi].name, by: actor, at: Date.now(), mid: sentMid_(csent) });
-    return csent;
+    return askCompanyDelete_(chatId, [model[xi].name], actor, mid);
   }
   if (head === 'codelok') {
     var stc = getState_(chatId);
@@ -1540,8 +1913,16 @@ function handleCallback_(cb) {
     if (!stc || stc.op !== 'codel-confirm') return tgReply_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
     if (stc.mid && stc.mid !== mid) return tgReply_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
     try {
-      var co = opRemoveCompany_(stc.name, actor);
-      return tgReply_(chatId, mid, '✅ 업체 〔' + esc_(co.name) + '〕 삭제됨 (도메인 ' + co.domains.length + '개)\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+      var conames = (stc.names && stc.names.length) ? stc.names : [stc.name];
+      var rco = opRemoveCompanies_(conames, actor);
+      if (rco.removed.length === 1 && !rco.missing.length) {
+        return tgReply_(chatId, mid, '✅ 업체 〔' + esc_(rco.removed[0].name) + '〕 삭제됨 (도메인 ' + rco.removed[0].count + '개)\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+      }
+      var col = bulkLines_('✅ 업체 ' + rco.removed.length + '곳 삭제', [
+        ['−', rco.removed.map(function (x) { return x.name + ' (도메인 ' + x.count + '개)'; })],
+        ['⚠️', rco.missing.map(function (x) { return x + ' (그런 업체가 없음)'; })],
+      ]);
+      return tgReply_(chatId, mid, '<blockquote>' + col.join('\n') + '</blockquote>\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
     } catch (e) { return tgReply_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
   }
 

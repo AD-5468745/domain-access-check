@@ -181,7 +181,7 @@ function answerNow(cbId) {
   fetch('https://api.telegram.org/bot' + BOT_TOKEN + '/answerCallbackQuery', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ callback_query_id: cbId, text: '⏳ 잠시만요', cache_time: 0 }),
+    body: JSON.stringify({ callback_query_id: cbId, text: '⏳ 잠시만요!', cache_time: 0 }),
   }).catch(() => {});
 }
 
