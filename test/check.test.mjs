@@ -466,14 +466,28 @@ t('진짜 제한(403)은 그대로 제한', async () => {
   });
   assert.equal(r.status, 'warn');
 });
-t('요약에 봇차단 줄이 붙는다', () => {
+// ★ 2026-09-05 실측으로 바로잡음 —
+//   한국에서 진짜 차단되면 '응답 자체가 없다'(타임아웃·연결끊김). 방화벽이 403 화면을 돌려줬다는 건
+//   한국에서 그 서버까지 잘 닿았다는 뜻이다. 그래서 봇차단은 경보가 아니라 '정상 도달'로 센다.
+t('봇차단만 있으면 모두 정상으로 본다', () => {
   const rep = buildTelegramReport([
     { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '봇차단(403)' },
     { company: 'A', domain: 'https://b.com/', status: 'up', note: '정상' },
   ], { nowKst: '2026-09-05 05:00', round: '수동' });
   assert.equal(rep.blocked, 1);
-  assert.equal(/🛡 봇차단 1/.test(rep.text), true);
-  assert.equal(/로봇 접속을 막습니다/.test(rep.text), true);
+  assert.equal(/총 2개 모두 정상 ✅/.test(rep.text), true, rep.text);
+  assert.equal(/서버까지 도달은 확인됨/.test(rep.text), true);
+  assert.equal(/확인 필요/.test(rep.text), false, '봇차단을 경보로 올리면 안 된다');
+});
+t('진짜 문제와 섞이면 봇차단은 정상 쪽으로 센다', () => {
+  const rep = buildTelegramReport([
+    { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '봇차단(403)' },
+    { company: 'A', domain: 'https://b.com/', status: 'down', note: '접속실패(타임아웃)' },
+  ], { nowKst: '2026-09-05 05:00', round: '수동' });
+  assert.equal(/✅ 정상 1/.test(rep.text), true, rep.text);
+  assert.equal(/❌ 이상 1/.test(rep.text), true);
+  assert.equal(/확인 필요/.test(rep.text), true);
+  assert.equal(/a\.com/.test(rep.text.split('확인 필요')[1] || ''), false, '봇차단은 목록에 안 나온다');
 });
 
 // ── 2-5. 막힌 것만 진짜 브라우저로 다시 확인 ────────────────
@@ -503,7 +517,7 @@ t('브라우저로도 막히면 봇차단으로 남는다', async () => {
     launchImpl: async () => fakeBrowser({ status: 403, title: 'Attention Required! | Cloudflare' }),
   });
   assert.equal(results[0].status, 'blocked');
-  assert.equal(/브라우저로도 막힘/.test(results[0].note), true);
+  assert.equal(/서버까지 도달 확인/.test(results[0].note), true);
 });
 t('브라우저에서 다른 주소로 넘어가면 주소확인', async () => {
   const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '봇차단' }];

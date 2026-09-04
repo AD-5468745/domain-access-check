@@ -294,10 +294,12 @@ async function main() {
 
   // 4) 리포트 만들기
   const report = buildTelegramReport(results, { nowKst, round, skipped });
-  const summary = report.up === report.total
-    ? `총 ${report.total}개 모두 정상 ✅`
-    : `총 ${report.total} · ✅${report.up} ⚠️${report.warn} ❌${report.down} 🔀${report.redir}` +
-      (report.blocked ? ` 🛡${report.blocked}` : '');
+  // 봇차단은 '서버까지 도달됨'이므로 정상 쪽으로 센다(자세한 이유는 lib/core.js STATUS 주석)
+  const reached = report.up + report.blocked;
+  const summary = reached === report.total
+    ? `총 ${report.total}개 모두 정상 ✅` + (report.blocked ? ` (🛡${report.blocked} 방화벽 화면)` : '')
+    : `총 ${report.total} · ✅${reached} ⚠️${report.warn} ❌${report.down} 🔀${report.redir}` +
+      (report.blocked ? ` (🛡${report.blocked})` : '');
 
   // 5) 결과 기록(앱스스크립트 브리지) — '결과'·'시스템' 탭
   let wrote = true;
