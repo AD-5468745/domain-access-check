@@ -148,16 +148,39 @@ async function verifyKoreaIp() {
   }
 }
 
-// 앱스스크립트 브리지 URL(토큰 포함)
+// 앱스스크립트 브리지 URL(토큰 포함) — 질의문자열 방식(호환용 대체 경로)
 function bridgeUrl(action) {
   const sep = CFG.bridgeUrl.includes('?') ? '&' : '?';
   return `${CFG.bridgeUrl}${sep}token=${encodeURIComponent(CFG.bridgeToken)}&action=${action}`;
 }
 
-// 시트 읽기(브리지 GET) → parseSheet + 담당자가 채널에서 바꾼 설정
+/**
+ * 브리지 호출은 POST + 본문에 토큰/동작을 담는다.
+ * ★ 왜 GET 이 아닌가 — 한국 VPN 을 경유하면 `?token=...&action=read` 가 붙은 GET 이
+ *   중간에서 404 로 잘렸다(2026-09-04 실측). 같은 계정의 다른 점검 시스템도
+ *   같은 이유로 읽기·쓰기를 모두 POST 로 한다. 덤으로 URL 에 비밀값이 남지 않는다.
+ */
+async function bridgePost(action, payload, timeoutMs) {
+  return fetchWithTimeout(CFG.bridgeUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    redirect: 'follow',
+    body: JSON.stringify({ token: CFG.bridgeToken, action, ...(payload || {}) }),
+  }, timeoutMs);
+}
+
+// 시트 읽기(브리지 POST) → parseSheet + 담당자가 채널에서 바꾼 설정
 async function readDomains() {
-  const res = await fetchWithTimeout(bridgeUrl('read'), { redirect: 'follow' });
-  if (!res.ok) throw new Error(`시트 브리지 read 실패(HTTP ${res.status})`);
+  let res;
+  try {
+    res = await bridgePost('read');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    // 대체 경로: 옛 배포(POST read 미지원)로도 돌아가게 GET 으로 한 번 더
+    console.error('[sheet] POST read 실패 → GET 으로 재시도:', safeMsg(e));
+    res = await fetchWithTimeout(bridgeUrl('read'), { redirect: 'follow' });
+    if (!res.ok) throw new Error(`시트 브리지 read 실패(HTTP ${res.status})`);
+  }
   const data = await res.json();
   if (!data.ok) throw new Error(`시트 브리지 read 오류: ${data.error || '알수없음'}`);
   return { ...parseSheet(data.values || []), settings: data.settings || {} };
@@ -166,12 +189,7 @@ async function readDomains() {
 // 결과 쓰기(브리지 POST) — 시트 '결과' 탭 + '시스템' 탭 갱신용 meta 동봉
 async function writeResults(results, nowKst, meta) {
   const rows = buildSheetRows(results, nowKst);
-  const res = await fetchWithTimeout(bridgeUrl('write'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    redirect: 'follow',
-    body: JSON.stringify({ rows, meta: meta || {} }),
-  });
+  const res = await bridgePost('write', { rows, meta: meta || {} });
   if (!res.ok) throw new Error(`시트 브리지 write 실패(HTTP ${res.status})`);
   const data = await res.json().catch(() => ({ ok: false }));
   if (!data.ok) throw new Error(`시트 브리지 write 오류: ${data.error || '알수없음'}`);
@@ -181,12 +199,7 @@ async function writeResults(results, nowKst, meta) {
 async function reportFailure(message) {
   if (!CFG.bridgeUrl || !CFG.bridgeToken) return;
   try {
-    await fetchWithTimeout(bridgeUrl('fail'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      redirect: 'follow',
-      body: JSON.stringify({ error: safeMsg(message) }),
-    }, 20000);
+    await bridgePost('fail', { error: safeMsg(message) }, 20000);
   } catch { /* 실패 보고 실패는 무시 */ }
 }
 

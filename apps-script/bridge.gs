@@ -1364,26 +1364,42 @@ function handleTelegram_(e) {
 // ═══════════════════════════════════════════════════════════════════
 // 웹앱 진입점 (GitHub ↔ 브리지)
 // ═══════════════════════════════════════════════════════════════════
-function authorized_(e) {
+/** POST 본문을 한 번만 파싱해서 재사용한다(두 번 읽으면 빈 값이 된다) */
+function bodyOf_(e) {
+  try { return JSON.parse((e && e.postData && e.postData.contents) || '{}'); }
+  catch (ignore) { return {}; }
+}
+
+/**
+ * 잠금값은 URL 질의문자열(?token=)로도, POST 본문({token:...})으로도 받는다.
+ * ★ 본문 방식이 기본이다 — 한국 VPN 경유 시 질의문자열이 붙은 GET 이 중간에서
+ *   404 로 잘리는 사례가 있었다(2026-09-04). 본문에 담으면 URL 에 비밀값이 남지도 않는다.
+ *   텔레그램 웹훅만은 URL 에 넣을 수밖에 없으므로 두 방식을 모두 허용한다.
+ */
+function authorized_(e, body) {
   var token = prop_('ACCESS_TOKEN');
   if (!token) return false;
-  return !!(e && e.parameter && e.parameter.token === token);
+  var got = (e && e.parameter && e.parameter.token) || (body && body.token) || '';
+  return String(got) === String(token);
+}
+
+/** 시트 '접속점검' 탭을 그대로 읽어 돌려준다(doGet·doPost 공용) */
+function readPayload_() {
+  var sh = sheet_(SHEET_INPUT, true);
+  var lastRow = Math.max(1, sh.getLastRow());
+  var lastCol = Math.min(Math.max(1, sh.getLastColumn()), MAX_COMPANIES);
+  return {
+    ok: true,
+    values: sh.getRange(1, 1, lastRow, lastCol).getDisplayValues(),
+    settings: settings_(),
+  };
 }
 
 function doGet(e) {
   try {
     if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
     var action = (e.parameter.action || 'read');
-    if (action === 'read') {
-      var sh = sheet_(SHEET_INPUT, true);
-      var lastRow = Math.max(1, sh.getLastRow());
-      var lastCol = Math.min(Math.max(1, sh.getLastColumn()), MAX_COMPANIES);
-      return json_({
-        ok: true,
-        values: sh.getRange(1, 1, lastRow, lastCol).getDisplayValues(),
-        settings: settings_(),
-      });
-    }
+    if (action === 'read') return json_(readPayload_());
     if (action === 'ping') return json_({ ok: true, pong: true });
     return json_({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
@@ -1393,22 +1409,28 @@ function doGet(e) {
 
 function doPost(e) {
   try {
-    var action = (e.parameter && e.parameter.action) || 'write';
+    // 텔레그램 웹훅은 본문이 '업데이트'라 미리 파싱해도 해가 없다.
+    var isTg = !!(e && e.parameter && e.parameter.action === 'tg');
+    var body = isTg ? {} : bodyOf_(e);
+    var action = (e && e.parameter && e.parameter.action) || body.action || 'write';
+
     if (action === 'tg') {
-      if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
+      if (!authorized_(e, null)) return json_({ ok: false, error: 'unauthorized' });
       return handleTelegram_(e);
     }
-    if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
+    if (!authorized_(e, body)) return json_({ ok: false, error: 'unauthorized' });
+
+    // ★ read 를 POST 로도 받는다 — 한국 VPN 에서 GET 이 막히는 경우의 정식 경로.
+    if (action === 'read') return json_(readPayload_());
+    if (action === 'ping') return json_({ ok: true, pong: true });
     if (action === 'write') {
-      var body = JSON.parse((e.postData && e.postData.contents) || '{}');
       writeResults_(body.rows || [], body.meta || {});
       return json_({ ok: true, written: Math.max(0, (body.rows || []).length - 1) });
     }
     if (action === 'fail') {
-      var b2 = JSON.parse((e.postData && e.postData.contents) || '{}');
       clearWatchdog_();
       setProp_('RUN_STATE', '실패');
-      setProp_('LAST_ERROR', nowKst_() + ' ' + String(b2.error || '알 수 없는 오류'));
+      setProp_('LAST_ERROR', nowKst_() + ' ' + String(body.error || '알 수 없는 오류'));
       sysWrite_();
       return json_({ ok: true });
     }

@@ -497,6 +497,31 @@ const lastText = (env) => {
   t('토큰 틀리면 거부', () => assert.equal(bad.ok, false));
   const none = JSON.parse(B.doGet({ parameter: {} }).text);
   t('토큰 없으면 거부', () => assert.equal(none.ok, false));
+
+  // ★ 2026-09-04 사고: 한국 VPN 경유 시 질의문자열이 붙은 GET 이 404 로 잘렸다.
+  //   그래서 read 를 POST + 본문 토큰으로도 받을 수 있어야 한다(URL 에 비밀값도 안 남는다).
+  const pr = JSON.parse(B.doPost({
+    parameter: {},
+    postData: { contents: JSON.stringify({ token: 'tok', action: 'read' }) },
+  }).text);
+  t('POST read 성공(본문 토큰)', () => assert.equal(pr.ok, true));
+  t('POST read 가 GET read 와 같은 값', () => assert.deepEqual(pr.values, ok.values));
+  t('POST read 도 설정 전달', () => assert.deepEqual(pr.settings.hours, [9, 21]));
+
+  const prBad = JSON.parse(B.doPost({
+    parameter: {},
+    postData: { contents: JSON.stringify({ token: 'wrong', action: 'read' }) },
+  }).text);
+  t('POST 토큰 틀리면 거부', () => assert.equal(prBad.ok, false));
+
+  const prNone = JSON.parse(B.doPost({ parameter: {}, postData: { contents: '{}' } }).text);
+  t('POST 토큰 없으면 거부', () => assert.equal(prNone.ok, false));
+
+  const prPing = JSON.parse(B.doPost({
+    parameter: {},
+    postData: { contents: JSON.stringify({ token: 'tok', action: 'ping' }) },
+  }).text);
+  t('POST ping 응답', () => assert.equal(prPing.pong, true));
 }
 {
   const { env, B } = fresh(SEED);
@@ -507,6 +532,11 @@ const lastText = (env) => {
     postData: { contents: JSON.stringify({ rows, meta: { nowKst: '2026-08-28 21:00', summary: '총 1개 모두 정상 ✅', report: '리포트' } }) },
   }).text);
   t('write 성공', () => assert.equal(r.ok, true));
+  const rBody = JSON.parse(B.doPost({
+    parameter: {},
+    postData: { contents: JSON.stringify({ token: 'tok', action: 'write', rows, meta: { nowKst: '2026-08-28 21:00', summary: '총 1개 모두 정상 ✅', report: '리포트' } }) },
+  }).text);
+  t('write 도 본문 토큰으로 동작', () => assert.equal(rBody.ok, true));
   t('결과 탭 기록됨', () => assert.equal(env.sheets.get('결과').rows[1][1], 'egg-1.com'));
   t('시스템 탭 갱신됨', () => {
     const sys = env.sheets.get('시스템').rows.map((x) => x.join('|')).join('\n');
@@ -518,7 +548,7 @@ const lastText = (env) => {
 {
   const { env, B } = fresh(SEED);
   post(B, msg('점검'));
-  B.doPost({ parameter: { token: 'tok', action: 'fail' }, postData: { contents: JSON.stringify({ error: 'VPN 실패' }) } });
+  B.doPost({ parameter: {}, postData: { contents: JSON.stringify({ token: 'tok', action: 'fail', error: 'VPN 실패' }) } });
   t('실패 보고 시 감시 트리거 해제', () => assert.equal(env.triggers.some((x) => x.getHandlerFunction() === 'watchdog'), false));
   t('실패가 시스템 탭에 남음', () => {
     const sys = env.sheets.get('시스템').rows.map((x) => x.join('|')).join('\n');
