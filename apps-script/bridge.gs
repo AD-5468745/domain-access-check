@@ -47,6 +47,7 @@ var LOG_KEEP = 500;          // 이력 최대 보관 행수
 var STATE_TTL = 300;         // 대화 상태 유지 시간(초)
 var TG_LIMIT = 3500;         // 텔레그램 메시지 분할 기준(한도 4096보다 여유 있게)
 var WATCHDOG_MIN = 25;       // 점검 요청 후 이 시간 안에 결과가 없으면 경고
+var PANEL_DELAY_MS = 60000;  // 점검 결과 뒤 조작 패널을 다시 보내기까지 기다리는 시간
 
 // ★ 깨우기형 대기조(relay) — 담당자가 조작을 시작한 순간에만 깃허브에서 '빠른 응답조'를 띄운다.
 //   평소엔 꺼져 있다(24시간 놀리지 않는다). 살아 있는 동안 버튼 반응이 0~59초 → 1~3초.
@@ -1054,6 +1055,19 @@ function clearWatchdog_() {
   for (var i = 0; i < ts.length; i++) {
     if (ts[i].getHandlerFunction() === 'watchdog') ScriptApp.deleteTrigger(ts[i]);
   }
+}
+
+/**
+ * 점검 결과를 보낸 뒤 예약해 둔 조작 패널을 때가 되면 보낸다.
+ * ★ 앱스스크립트에는 '잠깐 기다리기'가 없다. 1분마다 도는 이 확인이 곧 타이머다.
+ *   웹훅 모드에서도 이 확인만은 반드시 돈다(그렇지 않으면 패널이 영영 안 온다).
+ */
+function panelTick_() {
+  var due = Number(prop_('PANEL_DUE_AT', '0')) || 0;
+  if (!due) return;
+  if (Date.now() < due) return;
+  setProp_('PANEL_DUE_AT', '0');
+  notifyChannel_(menuText_(), kbMain_());
 }
 
 function watchdog() {
@@ -2338,6 +2352,9 @@ function pollUpdates() {
   // ★ 설치 함수를 안전하게 실행하는 경로(아래 runPendingSetup_ 주석 참고)
   try { runPendingSetup_(); } catch (ignoreSetup) {}
 
+  // ★ 예약해 둔 조작 패널 보내기 — 웹훅 모드에서도 반드시 먼저 확인한다.
+  try { panelTick_(); } catch (ignorePanel) {}
+
   // ★ 즉답기(웹훅) 모드면 여기서 아무것도 하지 않는다.
   //   특히 아래 409 자동복구가 '우리 웹훅'을 지워버리는 사고를 막는다.
   if (mode_() === 'webhook') return;
@@ -2561,10 +2578,11 @@ function writeResults_(rows, meta) {
 
   sysWrite_();
 
-  // ★ 점검 결과 바로 뒤에 조작 패널을 '새 메시지'로 보낸다(에이든 지시 2026-09-04).
-  //   버튼은 그 메시지를 제자리에서 고쳐 쓰기 때문에, 결과가 쌓이면 패널이 위로 밀려
-  //   "눌러도 반응이 없다"처럼 보인다. 매 결과마다 아래에 새 패널을 두면 항상 손에 잡힌다.
-  try { notifyChannel_(menuText_(), kbMain_()); } catch (ignore7) {}
+  // ★ 조작 패널을 결과 '1분 뒤'에 새 메시지로 보낸다(에이든 지시 2026-09-05).
+  //   패널을 두는 이유: 버튼은 그 메시지를 제자리에서 고쳐 쓰기 때문에 결과가 쌓이면
+  //   위로 밀려 "눌러도 반응이 없다"처럼 보인다. 결과 바로 뒤에 붙으면 결과를 읽는 중에
+  //   끼어들어 어수선하므로, 1분 뒤에 보낸다(아래 panelTick_ 이 1분마다 확인해서 보낸다).
+  try { setProp_('PANEL_DUE_AT', String(Date.now() + PANEL_DELAY_MS)); } catch (ignore7) {}
 }
 
 // ═══════════════════════════════════════════════════════════════════

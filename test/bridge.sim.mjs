@@ -572,12 +572,35 @@ const lastText = (env) => {
     postData: { contents: JSON.stringify({ rows, meta: { nowKst: '2026-08-28 21:00', summary: '총 1개 모두 정상 ✅', report: '리포트' } }) },
   }).text);
   t('write 성공', () => assert.equal(r.ok, true));
-  // ★ 결과 뒤에 조작 패널이 새 메시지로 따라와야 한다(버튼이 위로 밀려 안 보이는 문제)
-  t('결과 뒤에 관리 패널을 새 메시지로 발송', () => {
+  // ★ 조작 패널은 결과 '1분 뒤'에 따라온다(에이든 지시 2026-09-05).
+  //   결과를 읽는 중에 끼어들지 않으면서, 버튼이 위로 밀려 안 보이는 문제도 막는다.
+  t('결과 직후에는 패널을 보내지 않는다', () => {
+    const sends = env.sent.filter((x) => x.method === 'sendMessage');
+    assert.equal(sends.some((x) => /접속점검 관리/.test(x.body.text)), false);
+  });
+  t('1분 뒤로 예약해 둔다', () => {
+    const due = Number(env.propStore.get('PANEL_DUE_AT') || 0);
+    assert.equal(due > 0, true);
+    assert.equal(due - env.getNow().getTime() >= 55000, true, `${due}`);
+  });
+  t('아직 때가 안 되면 보내지 않는다', () => {
+    const before = env.sent.length;
+    B.pollUpdates();
+    assert.equal(env.sent.filter((x) => x.method === 'sendMessage' && /접속점검 관리/.test(x.body.text)).length, 0);
+    assert.equal(env.sent.length >= before, true);
+  });
+  t('1분이 지나면 관리 패널이 새 메시지로 온다', () => {
+    env.setNow(new Date(env.getNow().getTime() + 61000).toISOString());
+    B.pollUpdates();
     const sends = env.sent.filter((x) => x.method === 'sendMessage');
     const last = sends[sends.length - 1];
     assert.equal(/접속점검 관리/.test(last.body.text), true);
     assert.equal(!!(last.body.reply_markup && last.body.reply_markup.inline_keyboard), true);
+  });
+  t('두 번 보내지 않는다', () => {
+    B.pollUpdates();
+    const n = env.sent.filter((x) => x.method === 'sendMessage' && /접속점검 관리/.test(x.body.text)).length;
+    assert.equal(n, 1);
   });
   const rBody = JSON.parse(B.doPost({
     parameter: {},

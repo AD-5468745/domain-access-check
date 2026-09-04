@@ -40,6 +40,16 @@ jobs:
       - name: 로직 검증(네트워크 불필요)
         run: npm test
 
+      # ★ 제휴 사이트 상당수가 Cloudflare 로 '사람 브라우저가 아닌 접속'을 막는다(2026-09-05 실측).
+      #   1차 점검에서 봇차단으로 걸린 주소만 이 크롬으로 다시 열어 사실을 확인한다.
+      #   --no-save: 저장소는 계속 '외부 의존성 0'으로 남는다(npm test 는 이것 없이도 돈다).
+      #   설치가 실패해도 점검은 계속된다 — 그때는 봇차단이 그대로 보고된다.
+      - name: 재확인용 크롬 준비
+        continue-on-error: true
+        run: |
+          npm i --no-save --no-audit --no-fund playwright@1.49.1
+          npx playwright install --with-deps chromium
+
       - name: OpenVPN 설치
         run: |
           sudo apt-get update -qq
@@ -160,6 +170,7 @@ jobs:
           EXPECT_COUNTRY: KR
           HTTP_TIMEOUT_MS: '15000'
           CHECK_CONCURRENCY: '10'
+          BROWSER_RECHECK: 'on'
           RUN_MODE: ${{ inputs.mode || 'manual' }}
         run: node check.js
 

@@ -264,6 +264,23 @@ async function main() {
   // 3) 한국 IP로 접속 점검
   const results = await checkMany(domains, { timeoutMs: CFG.timeoutMs, concurrency: CFG.concurrency });
 
+  // 3-0) 방화벽에 막힌 것만 '진짜 브라우저'로 다시 확인한다.
+  //   ★ 제휴 사이트는 Cloudflare 로 로봇 접속을 막는 곳이 많다. 1차(빠른 방식)로는 뚫을 수 없어
+  //     멀쩡한 사이트가 전부 경보로 찍힌다. 막힌 것만 크롬으로 다시 열어 사실을 확인한다.
+  //     playwright 가 없으면 아무 일도 하지 않고 1차 판정이 그대로 남는다.
+  if (String(process.env.BROWSER_RECHECK || 'on').toLowerCase() !== 'off') {
+    const blockedCount = results.filter((r) => r && r.status === 'blocked').length;
+    if (blockedCount) {
+      try {
+        const { recheckBlocked } = await import('./lib/browser.js');
+        const rb = await recheckBlocked(results, { timeoutMs: Math.max(CFG.timeoutMs, 30000) });
+        console.log(`[browser] 재확인 ${rb.rechecked}개 · 통과 ${rb.recovered}개` + (rb.used ? '' : ' (브라우저 없음 — 건너뜀)'));
+      } catch (e) {
+        console.error('[browser] 재확인 실패:', safeMsg(e));
+      }
+    }
+  }
+
   // 3-1) 점검 도중 VPN이 끊겼는지 다시 확인 — 끊겼다면 이 결과는 한국 결과가 아니다(가짜 결과 방지)
   const countryAfter = await verifyKoreaIp();
   if (countryAfter !== CFG.expectCountry) {
@@ -279,7 +296,8 @@ async function main() {
   const report = buildTelegramReport(results, { nowKst, round, skipped });
   const summary = report.up === report.total
     ? `총 ${report.total}개 모두 정상 ✅`
-    : `총 ${report.total} · ✅${report.up} ⚠️${report.warn} ❌${report.down} 🔀${report.redir}`;
+    : `총 ${report.total} · ✅${report.up} ⚠️${report.warn} ❌${report.down} 🔀${report.redir}` +
+      (report.blocked ? ` 🛡${report.blocked}` : '');
 
   // 5) 결과 기록(앱스스크립트 브리지) — '결과'·'시스템' 탭
   let wrote = true;

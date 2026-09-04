@@ -5,7 +5,8 @@ import {
   buildSheetRows, buildTelegramReport, countByStatus, groupProblems,
   statusCell, escapeHtml, SHEET_HEADER,
 } from '../lib/core.js';
-import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum } from '../lib/probe.js';
+import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked } from '../lib/probe.js';
+import { recheckBlocked, recheckOne } from '../lib/browser.js';
 import { splitForTelegram } from '../check.js';
 
 let pass = 0, fail = 0;
@@ -428,6 +429,99 @@ t('다른 주소로 넘어가면 주소확인', async () => {
   const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' },
     { retries: 0, fetchImpl: async () => mkRes(200, 'https://other.com/') });
   assert.equal(r.status, 'redir');
+});
+
+// ── 2-4. 방화벽(봇차단) 가려내기 ────────────────────────────
+//   2026-09-05 실측: 제휴 사이트가 Cloudflare 로 403 'Attention Required!' 를 돌려준다.
+//   이걸 '제한'으로 찍으면 멀쩡한 사이트 전부가 거짓 경보가 된다.
+const hdr = (o) => ({ get: (k) => o[String(k).toLowerCase()] || '' });
+t('cf-ray 가 있으면 봇차단', () => assert.equal(looksBotBlocked(403, hdr({ 'cf-ray': 'abc' }), ''), true));
+t('server: cloudflare 면 봇차단', () => assert.equal(looksBotBlocked(403, hdr({ server: 'cloudflare' }), ''), true));
+t('본문이 차단 페이지면 봇차단', () =>
+  assert.equal(looksBotBlocked(403, hdr({}), '<title>Attention Required! | Cloudflare</title>'), true));
+t('평범한 403 은 봇차단 아님', () => assert.equal(looksBotBlocked(403, hdr({ server: 'nginx' }), '<h1>Forbidden</h1>'), false));
+t('200 은 봇차단일 수 없음', () => assert.equal(looksBotBlocked(200, hdr({ 'cf-ray': 'abc' }), ''), false));
+t('404 는 봇차단 아님', () => assert.equal(looksBotBlocked(404, hdr({ 'cf-ray': 'abc' }), ''), false));
+
+t('방화벽 403 은 제한이 아니라 봇차단으로 찍힌다', async () => {
+  const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' }, {
+    retries: 0,
+    fetchImpl: async () => ({
+      status: 403, url: 'https://a.com/?code=X',
+      headers: hdr({ server: 'cloudflare', 'cf-ray': 'x' }),
+      text: async () => '<title>Attention Required! | Cloudflare</title>',
+      body: null,
+    }),
+  });
+  assert.equal(r.status, 'blocked');
+  assert.equal(/봇차단/.test(r.note), true);
+});
+t('진짜 제한(403)은 그대로 제한', async () => {
+  const r = await checkOne({ company: 'A', domain: 'https://a.com/', host: 'a.com' }, {
+    retries: 0,
+    fetchImpl: async () => ({
+      status: 403, url: 'https://a.com/', headers: hdr({ server: 'nginx' }),
+      text: async () => '<h1>Forbidden</h1>', body: null,
+    }),
+  });
+  assert.equal(r.status, 'warn');
+});
+t('요약에 봇차단 줄이 붙는다', () => {
+  const rep = buildTelegramReport([
+    { company: 'A', domain: 'https://a.com/', status: 'blocked', note: '봇차단(403)' },
+    { company: 'A', domain: 'https://b.com/', status: 'up', note: '정상' },
+  ], { nowKst: '2026-09-05 05:00', round: '수동' });
+  assert.equal(rep.blocked, 1);
+  assert.equal(/🛡 봇차단 1/.test(rep.text), true);
+  assert.equal(/로봇 접속을 막습니다/.test(rep.text), true);
+});
+
+// ── 2-5. 막힌 것만 진짜 브라우저로 다시 확인 ────────────────
+function fakeBrowser({ status = 200, url = 'https://a.com/?code=X', title = '', content = '<html></html>' } = {}) {
+  const page = {
+    goto: async () => ({ status: () => status, headers: () => ({}) }),
+    title: async () => title,
+    content: async () => content,
+    url: () => url,
+    waitForLoadState: async () => {},
+    close: async () => {},
+  };
+  const ctx = { newPage: async () => page, close: async () => {} };
+  return { newContext: async () => ctx, close: async () => {} };
+}
+t('브라우저로 열리면 정상으로 바뀐다', async () => {
+  const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '봇차단(403)' }];
+  const out = await recheckBlocked(results, { launchImpl: async () => fakeBrowser({ status: 200 }) });
+  assert.equal(out.used, true);
+  assert.equal(out.recovered, 1);
+  assert.equal(results[0].status, 'up');
+  assert.equal(/브라우저로 확인/.test(results[0].note), true);
+});
+t('브라우저로도 막히면 봇차단으로 남는다', async () => {
+  const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '봇차단(403)' }];
+  await recheckBlocked(results, {
+    launchImpl: async () => fakeBrowser({ status: 403, title: 'Attention Required! | Cloudflare' }),
+  });
+  assert.equal(results[0].status, 'blocked');
+  assert.equal(/브라우저로도 막힘/.test(results[0].note), true);
+});
+t('브라우저에서 다른 주소로 넘어가면 주소확인', async () => {
+  const results = [{ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com', status: 'blocked', note: '봇차단' }];
+  await recheckBlocked(results, { launchImpl: async () => fakeBrowser({ status: 200, url: 'https://other.com/' }) });
+  assert.equal(results[0].status, 'redir');
+  assert.equal(results[0].redirectTo, 'other.com');
+});
+t('막힌 게 없으면 브라우저를 아예 켜지 않는다', async () => {
+  let opened = false;
+  const out = await recheckBlocked([{ status: 'up' }], { launchImpl: async () => { opened = true; return fakeBrowser(); } });
+  assert.equal(opened, false);
+  assert.equal(out.used, false);
+});
+t('브라우저가 없으면 1차 판정을 그대로 둔다', async () => {
+  const results = [{ company: 'A', domain: 'https://a.com/', host: 'a.com', status: 'blocked', note: '봇차단(403)' }];
+  const out = await recheckBlocked(results, { launchImpl: async () => { throw new Error('없음'); } });
+  assert.equal(out.used, false);
+  assert.equal(results[0].status, 'blocked');
 });
 
 t('제휴 링크는 통째로 보존', () => {
