@@ -1653,6 +1653,71 @@ const AIDEN_URLS = [
 }
 
 // ═══════════════════════════════════════════════════════════
+// 12-5. 버튼만으로 '여러 업체 한 번에' (2026-09-05 에이든 지시)
+//   ★ 업체 하나를 고르게 해놓고 거기에 여러 업체를 붙여넣는 건 앞뒤가 안 맞는다.
+//     업체를 고르지 않고 바로 가는 길이 있어야 한다.
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  t('업체 선택 화면에 [여러 업체 한 번에] 가 있다', () => {
+    const kb = JSON.stringify(lastSent(env).body.reply_markup);
+    assert.equal(kb.indexOf('"addm"') !== -1, true);
+    assert.equal(/여러 업체 한 번에/.test(kb), true);
+  });
+  post(B, cbqLast(env, 'addm'));
+  t('업체를 묻지 않고 붙여넣기 안내를 준다', () => {
+    const txt = lastText(env);
+    assert.equal(/여러 업체 한 번에/.test(txt), true);
+    assert.equal(/자동으로 만듭니다/.test(txt), true);
+    const kb2 = JSON.stringify(lastSent(env).body.reply_markup || {});
+    assert.equal(/"a:\d+"/.test(kb2), false, '업체 고르는 버튼을 또 띄우면 안 된다: ' + kb2);
+  });
+  post(B, msg('짱구계열\nzz1.com\nzz2.com\n\n레고\nzz3.com'));
+  t('붙여넣은 대로 업체별로 들어간다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m.map((c) => c.name), ['누드티비', '파트너사', '짱구계열', '레고']);
+    assert.deepEqual(m[2].domains, ['zz1.com', 'zz2.com']);
+    assert.deepEqual(m[3].domains, ['zz3.com']);
+  });
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  post(B, cbqLast(env, 'addm'));
+  post(B, msg('짱구계열 zz1.com zz2.com 레고 zz3.com'));
+  t('한 줄로 이어 써도 업체별로 갈라 넣는다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m[2], { name: '짱구계열', domains: ['zz1.com', 'zz2.com'] });
+    assert.deepEqual(m[3], { name: '레고', domains: ['zz3.com'] });
+  });
+}
+{
+  // 업체 이름 없이 주소만 붙여넣으면 그때만 업체를 묻는다
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  post(B, cbqLast(env, 'addm'));
+  post(B, msg('zz1.com\nzz2.com'));
+  t('업체 이름이 없으면 그때 물어본다', () => {
+    assert.equal(/어느 업체에 넣을까요/.test(lastText(env)), true);
+    assert.equal(B.loadModel_().length, 2, '함부로 업체를 만들면 안 된다');
+  });
+  post(B, cbqLast(env, 'a:0'));
+  t('고른 업체에 들어간다', () => assert.equal(B.loadModel_()[0].domains.length, 4));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  post(B, cbqLast(env, 'addm'));
+  post(B, msg('그냥 잡담입니다'));
+  t('못 알아들으면 사용법을 다시 보여준다', () => {
+    assert.equal(/못 알아들었습니다/.test(lastText(env)), true);
+    assert.equal(/여러 업체 한 번에/.test(lastText(env)), true);
+    assert.deepEqual(B.loadModel_(), SEED);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
 // 13. 문서 ↔ 코드 대조 — 설명서에 적힌 대로 실제로 동작하는가
 //     (문서와 코드가 어긋나면 비개발자는 그 자리에서 막힌다)
 // ═══════════════════════════════════════════════════════════

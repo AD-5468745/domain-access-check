@@ -930,7 +930,9 @@ function helpText_() {
     '',
     '📦 <b>한 번에 여러 개</b>',
     '',
-    '<blockquote>업체 이름을 맨 윗줄에 적고 그 아래에 주소를 붙여넣으면',
+    '<blockquote>버튼으로: [➕ 도메인 추가] → <b>[📋 여러 업체 한 번에]</b>',
+    '',
+    '업체 이름을 맨 윗줄에 적고 그 아래에 주소를 붙여넣으면',
     '그 업체로 한 번에 들어갑니다. 예)',
     '누드티비',
     'a.com',
@@ -1337,6 +1339,26 @@ function opAddGroups_(groups, actor) {
 }
 
 /** 업체별 묶음 등록 결과를 담당자에게 보고한다. */
+/** '여러 업체 한 번에' 입력 안내 — 버튼 화면과 도움말이 같은 문구를 쓰게 한 곳에 둔다. */
+function addGroupsGuide_() {
+  return [
+    '📋 <b>여러 업체 한 번에</b>',
+    '',
+    '업체 이름을 쓰고 <b>그 아래에 주소</b>를 붙여넣으세요. 그대로 이어서 다음 업체를 쓰면 됩니다.',
+    '',
+    '<blockquote>짱구계열',
+    'https://a.com/?code=NDTV',
+    'https://b.com/?code=NDTV',
+    '',
+    '레고',
+    'https://c.com/?code=ndtv</blockquote>',
+    '',
+    '<blockquote>· 없는 업체는 <b>자동으로 만듭니다</b>',
+    '· 한 줄로 이어 써도 됩니다 — <b>짱구계열 a.com b.com 레고 c.com</b>',
+    '· 주소는 적으신 그대로 등록됩니다 (취소: 취소)</blockquote>',
+  ].join('\n');
+}
+
 function doAddGroups_(chatId, groups, actor, note) {
   try {
     var out = opAddGroups_(groups, actor);
@@ -1968,6 +1990,26 @@ function askUndo_(chatId) {
 
 // 대화 중 입력 받기
 function handleStateInput_(chatId, st, text, actor) {
+  if (st.op === 'add-groups') {
+    var pg2 = parseGroups_(text);
+    var named2 = pg2.groups.filter(function (g) { return !!g.name; });
+    if (named2.length) {
+      return doAddGroups_(chatId, named2, actor,
+        pg2.bad.length ? '주소 형식이 아닌 ' + pg2.bad.length + '개는 건너뛰었습니다.' : '');
+    }
+    // 업체 이름 없이 주소만 붙여넣은 경우 — 예전 방식으로 안내한다
+    var only = splitTokens_(tokens_(text));
+    if (only.ok.length) {
+      var m2 = loadModel_();
+      if (m2.length) {
+        setState_(chatId, { op: 'add-pick-company', domains: only.ok.concat(only.bad), by: actor, at: Date.now() });
+        return tgSend_(chatId, '➕ 업체 이름이 안 보입니다. 주소 ' + only.ok.length + '개를 어느 업체에 넣을까요?',
+          kbCompanies_(m2, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
+      }
+    }
+    clearState_(chatId);
+    return tgSend_(chatId, '❌ 업체 이름과 주소를 못 알아들었습니다.\n\n' + addGroupsGuide_(), kbMain_());
+  }
   if (st.op === 'add-input') {
     // 업체별 묶음을 통째로 붙여넣었다면 고른 업체 대신 묶음대로 넣는다
     var pgs = parseGroups_(text);
@@ -2077,7 +2119,7 @@ function handleCallback_(cb) {
   var head = parts[0];
 
   // 다른 담당자가 절차를 진행 중이면 새 절차 시작을 막는다(입력이 섞이는 사고 방지)
-  if (['add', 'del', 'coa', 'cor', 'cod', 'cfgh', 'dx', 'dm', 'codp', 'corp'].indexOf(head) !== -1) {
+  if (['add', 'addm', 'del', 'coa', 'cor', 'cod', 'cfgh', 'dx', 'dm', 'codp', 'corp'].indexOf(head) !== -1) {
     var busy = busyBy_(chatId, actor);
     if (busy) return tgReply_(chatId, mid, busy, kbMain_());
   }
@@ -2103,8 +2145,17 @@ function handleCallback_(cb) {
       setState_(chatId, { op: 'co-add', thenAdd: true, by: actor, at: Date.now() });
       return tgReply_(chatId, mid, '🏢 등록된 업체가 없습니다. 먼저 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비\n업체를 만들면 바로 주소를 물어봅니다. (취소: 취소)</blockquote>');
     }
+    // ★ 업체 하나를 고르게 해놓고 거기에 여러 업체를 붙여넣는 건 앞뒤가 안 맞는다.
+    //   업체를 안 고르고 바로 가는 길을 따로 둔다(에이든 지시 2026-09-05).
     return tgReply_(chatId, mid, '➕ 어느 업체에 추가할까요?',
-      kbCompanies_(model, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
+      kbCompanies_(model, 'a', [
+        [{ text: '📋 여러 업체 한 번에', callback_data: 'addm' }],
+        [{ text: '+ 새 업체', callback_data: 'an' }],
+      ]));
+  }
+  if (head === 'addm') {
+    setState_(chatId, { op: 'add-groups', by: actor, at: Date.now() });
+    return tgReply_(chatId, mid, addGroupsGuide_());
   }
   if (head === 'a') {
     var ci = Number(parts[1]);
