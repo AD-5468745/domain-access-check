@@ -588,7 +588,16 @@ function sentMid_(res) {
   return (res && res.result && res.result.message_id) || 0;
 }
 
+/**
+ * ★ 버튼을 누른 사람에게 '받았다'를 알리는 응답.
+ *   대기조가 살아 있으면 대기조가 이미 0.3초 안에 먼저 보낸다(즉답).
+ *   같은 버튼에 두 번 답할 수는 없으므로, 그럴 땐 여기서 건너뛴다
+ *   — 안 그러면 매번 실패로 기록돼 '마지막 오류'가 더러워진다.
+ */
+var PRE_ANSWERED = false;
+
 function tgAnswer_(cbId, text) {
+  if (PRE_ANSWERED) return;
   tgApi_('answerCallbackQuery', { callback_query_id: cbId, text: text || '' });
 }
 
@@ -1600,6 +1609,7 @@ function handleTelegram_(e) {
  */
 function pollUpdates() {
   PROP_MEMO = null;
+  PRE_ANSWERED = false;      // 폴링으로 직접 가져온 명령은 아무도 먼저 답하지 않았다
   var bot = prop_('BOT_TOKEN');
   if (!bot) return;
 
@@ -1747,7 +1757,11 @@ function doPost(e) {
       }
       relayTouch_();                                 // 살아 있다는 신호
       var relayResult = null;
-      if (action === 'relay-update') relayResult = processUpdate_(body.update || null);
+      if (action === 'relay-update') {
+      PRE_ANSWERED = !!body.preAnswered;      // 대기조가 이미 즉답을 보냈나
+      relayResult = processUpdate_(body.update || null);
+      PRE_ANSWERED = false;
+    }
       if (body.offset) setProp_('TG_OFFSET', String(body.offset));
       return json_({ ok: true, result: relayResult });
     }

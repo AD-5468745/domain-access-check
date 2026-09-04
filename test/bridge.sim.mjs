@@ -857,6 +857,30 @@ const lastText = (env) => {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 11-3-4. 즉답 — 대기조가 먼저 답하면 구글은 다시 답하지 않는다
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  JSON.parse(B.doPost({ parameter: {}, postData: { contents: JSON.stringify({ token: 'tok', action: 'relay-hello', relayId: 'RA' }) } }).text);
+  env.sent.length = 0;
+  B.doPost({ parameter: {}, postData: { contents: JSON.stringify({
+    token: 'tok', action: 'relay-update', relayId: 'RA', preAnswered: true,
+    update: { callback_query: { id: 'cb9', data: 'list', from: { id: 7, first_name: '박담당' }, message: { chat: { id: '-1001' }, message_id: 77 } } },
+  }) } });
+  t('대기조가 먼저 답했으면 구글은 버튼 응답을 다시 보내지 않는다', () => {
+    assert.equal(env.sent.some((x) => x.method === 'answerCallbackQuery'), false);
+  });
+  t('그래도 화면은 정상으로 나간다', () => assert.equal(/등록된 도메인/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('list'));
+  t('아무도 먼저 답하지 않았으면 구글이 버튼 응답을 보낸다', () => {
+    assert.equal(env.sent.some((x) => x.method === 'answerCallbackQuery'), true);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
 // 11-3-3. 자동 예열 — '첫 조작만 느린' 문제를 없앤다
 // ═══════════════════════════════════════════════════════════
 {
@@ -1445,6 +1469,19 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('브리지가 GET 에 잠금값을 요구한다(사라진 본문이 통과하지 못하게)', () => {
     const at = GS2.indexOf('function doGet');
     assert.equal(/authorized_\(e\)/.test(GS2.slice(at, at + 300)), true);
+  });
+  // ★ 즉답 — 구글에 넘기기 '전에' 버튼에 먼저 답해야 체감이 빨라진다
+  t('대기조가 구글보다 먼저 버튼에 답한다', () => {
+    const at = RELAY_JS.indexOf('answerNow(u.callback_query.id)');
+    const fwd = RELAY_JS.indexOf("bridge('relay-update'");
+    assert.equal(at !== -1 && at < fwd, true, '즉답이 전달보다 먼저여야 한다');
+  });
+  t('즉답 사실을 구글에 알려 중복 응답을 막는다', () => {
+    assert.equal(/preAnswered: pre/.test(RELAY_JS), true);
+    assert.equal(/if \(PRE_ANSWERED\) return;/.test(GS2), true);
+  });
+  t('즉답은 기다리지 않고 쏘아 보낸다(처리를 늦추지 않게)', () => {
+    assert.equal(/await answerNow/.test(RELAY_JS), false);
   });
   t('대기조가 한 번 깨면 충분히 오래 살아 있다', () => {
     const idle = Number((RELAY_JS.match(/IDLE_MINUTES \|\| (\d+)/) || [])[1]);

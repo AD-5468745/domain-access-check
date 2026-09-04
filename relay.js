@@ -168,6 +168,23 @@ async function getUpdates(offset) {
   throw new Error('텔레그램 수신 실패: ' + desc.slice(0, 120));
 }
 
+/**
+ * ★ 즉답 — 버튼을 누른 사람에게 0.3초 안에 '받았다'를 알린다.
+ *
+ *   원래는 구글이 처리를 끝낸 뒤에야(2~4초) 응답이 갔다. 그 사이에는 화면에 아무 변화가 없어
+ *   '먹통'처럼 보였다. 대기조는 이미 텔레그램 옆에 붙어 있으므로, 구글에 넘기기 전에
+ *   여기서 먼저 답해 준다. 기다리지 않고(await 없이) 쏘아 보내 실제 처리를 늦추지 않는다.
+ *
+ *   주의: 한 버튼에는 한 번만 답할 수 있다 → 앱스스크립트 쪽은 preAnswered 를 보고 건너뛴다.
+ */
+function answerNow(cbId) {
+  fetch('https://api.telegram.org/bot' + BOT_TOKEN + '/answerCallbackQuery', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: cbId, text: '⏳ 잠시만요', cache_time: 0 }),
+  }).catch(() => {});
+}
+
 async function main() {
   if (!BRIDGE_URL || !BRIDGE_TOKEN || !BOT_TOKEN) {
     console.log('필요한 값이 없습니다 (BRIDGE_URL / BRIDGE_TOKEN / BOT_TOKEN) — 종료합니다.');
@@ -227,9 +244,13 @@ async function main() {
 
     let broke = false;
     for (const u of list) {
+      // 버튼이면 구글에 넘기기 전에 먼저 답한다(체감 0.3초).
+      let pre = false;
+      if (u.callback_query && u.callback_query.id) { pre = true; answerNow(u.callback_query.id); }
+
       let ok = false;
       try {
-        const r = await bridge('relay-update', { update: u, offset: u.update_id + 1 });
+        const r = await bridge('relay-update', { update: u, offset: u.update_id + 1, preAnswered: pre });
         ok = !!(r && r.ok);
       } catch (e) { ok = false; }
       if (!ok) {
