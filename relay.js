@@ -25,8 +25,10 @@ const BRIDGE_URL = process.env.BRIDGE_URL || '';
 const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 
-const IDLE_MS = Math.max(1, Number(process.env.IDLE_MINUTES || 10)) * 60 * 1000;
-const HARD_STOP_MS = 16 * 60 * 1000;   // 워크플로 제한(20분)보다 넉넉히 먼저 스스로 끝낸다
+// ★ 2026-09-05: 10분이면 담당자가 잠깐 다른 일을 하는 사이에 꺼져, 다음 첫 조작이 또 느렸다.
+//   실제 사용은 '한동안 붙어서 여러 번 조작'이므로 넉넉히 잡는다(공개 저장소라 요금 0).
+const IDLE_MS = Math.max(1, Number(process.env.IDLE_MINUTES || 20)) * 60 * 1000;
+const HARD_STOP_MS = 55 * 60 * 1000;   // 워크플로 제한(60분)보다 먼저 스스로 끝낸다
 const LONG_POLL_S = 20;                // 텔레그램에 '새 명령 생길 때까지' 귀 대고 있는 시간
 const BRIDGE_TRIES = 3;                // 브리지 한 번 호출에 허용하는 재시도 횟수
 const PING_FAIL_LIMIT = 5;             // 하트비트가 이만큼 연달아 실패하면 물러난다
@@ -73,6 +75,29 @@ async function bridgeOnce(action, payload, timeoutMs) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action, relayId: RELAY_ID }, payload || {})),
   }, timeoutMs || 45000);
+}
+
+/**
+ * ★ 하트비트는 '답'이 필요 없다 — 신호만 닿으면 된다.
+ *   앱스스크립트는 POST 를 받아 스크립트를 실행한 뒤 302로 임시 주소를 알려주는데,
+ *   그 임시 주소를 따라가다 404 가 나는 게 문제였다(2026-09-05).
+ *   따라가지 않고 302 자체를 '닿았다'로 인정하면 그 실패 자체가 사라진다.
+ */
+async function bridgePing(offset) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 30000);
+  try {
+    const res = await fetch(BRIDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: BRIDGE_TOKEN, action: 'relay-ping', relayId: RELAY_ID, offset }),
+      redirect: 'manual',
+      signal: ac.signal,
+    });
+    // 302(넘김) = 스크립트가 이미 돌았다는 뜻. 200 도 물론 정상.
+    if (res.status >= 200 && res.status < 400) return { ok: true, viaRedirect: res.status >= 300 };
+    throw new Error('HTTP ' + res.status);
+  } finally { clearTimeout(timer); }
 }
 
 async function bridge(action, payload, timeoutMs) {
@@ -147,7 +172,7 @@ async function main() {
 
     if (!list.length) {
       let beat = null;
-      try { beat = await bridge('relay-ping', { offset }); pingFails = 0; }
+      try { beat = await bridgePing(offset); pingFails = 0; }
       catch (e) {
         // ★ 한 번 삐끗했다고 물러나지 않는다. 응답을 못 받았을 뿐 신호는 닿았을 수 있다.
         pingFails += 1;

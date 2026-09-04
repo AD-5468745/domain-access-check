@@ -2,7 +2,7 @@ name: 명령 즉시 응답 (대기조)
 
 # 평소엔 꺼져 있다.
 #   담당자가 채널에서 첫 조작을 하면 앱스스크립트(bridge.gs → wakeRelay_)가 이 워크플로를 깨운다.
-#   살아 있는 동안 텔레그램 명령을 초 단위로 받아 넘기고, 10분간 조용하면 스스로 끝난다.
+#   살아 있는 동안 텔레그램 명령을 초 단위로 받아 넘기고, 20분간 조용하면 스스로 끝난다.
 #
 # 왜 정기 실행(cron)이 아닌가
 #   · 24시간 켜둘 이유가 없다 — 담당자가 실제로 조작하는 시간에만 필요하다.
@@ -18,7 +18,7 @@ on:
       minutes:
         description: '채널이 조용하면 끄기까지 기다리는 시간(분)'
         required: false
-        default: '10'
+        default: '20'
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
   relay:
     name: 대기조
     runs-on: ubuntu-latest
-    timeout-minutes: 20      # relay.js 는 16분에 스스로 끝난다(여유 4분)
+    timeout-minutes: 60      # relay.js 는 55분에 스스로 끝난다(여유 5분)
 
     steps:
       - name: 코드 받기

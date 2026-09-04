@@ -892,7 +892,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   const { env, B } = fresh(SEED);
   post(B, msg('목록'));
   t('첫 조작이 대기조를 깨움', () => assert.equal(relayRuns(env).length, 1));
-  t('대기조에 조용해지면 끌 시간을 넘김', () => assert.equal(relayRuns(env)[0].body.inputs.minutes, '10'));
+  t('대기조에 조용해지면 끌 시간을 넘김', () => assert.equal(relayRuns(env)[0].body.inputs.minutes, '20'));
 
   post(B, msg('상태'));
   t('연달아 온 조작은 다시 깨우지 않음(1분 쿨다운)', () => assert.equal(relayRuns(env).length, 1));
@@ -909,7 +909,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('대기조 시작 시 이어받을 지점을 알려줌', () => {
     assert.equal(hello.ok, true);
     assert.equal(hello.offset, 0);
-    assert.equal(hello.idleMinutes, 10);
+    assert.equal(hello.idleMinutes, 20);
   });
   t('두 번째 대기조는 스스로 물러남', () => assert.equal(relayApi(B, 'relay-hello', { relayId: 'R2' }).alreadyAlive, true));
   // ★ 2026-09-05 실측 사고: 첫 응답이 느려 대기조가 30초 만에 포기했는데 구글은 뒤늦게 실행 →
@@ -1387,6 +1387,15 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
     assert.notEqual(g(RELAY_YML), g(CHECK_YML));
   });
   // ★ relay.js 가 스스로 끝나는 시간보다 워크플로 제한이 짧으면 매번 '실패'로 끝난다.
+  // ★ 하트비트는 302(넘김)만 받아도 성공으로 본다 — 임시주소 404 로 죽던 사고(2026-09-05) 차단
+  t('하트비트는 넘김(302)만 받아도 성공으로 본다', () => {
+    assert.equal(/redirect: 'manual'/.test(RELAY_JS), true);
+    assert.equal(/res\.status >= 200 && res\.status < 400/.test(RELAY_JS), true);
+  });
+  t('대기조가 한 번 깨면 충분히 오래 살아 있다', () => {
+    const idle = Number((RELAY_JS.match(/IDLE_MINUTES \|\| (\d+)/) || [])[1]);
+    assert.equal(idle >= 20, true, `조용해지면 끄는 시간 ${idle}분은 너무 짧다`);
+  });
   t('워크플로 제한이 자체 종료 시간보다 길다', () => {
     const limit = Number((RELAY_YML.match(/timeout-minutes:\s*(\d+)/) || [])[1]);
     const self = Number((RELAY_JS.match(/HARD_STOP_MS\s*=\s*(\d+)/) || [])[1]);
