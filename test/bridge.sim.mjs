@@ -1425,6 +1425,115 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
 }
 
 // ═══════════════════════════════════════════════════════════
+// 12-2. 여러 업체 × 여러 도메인 한 번에 (2026-09-05 에이든 지시)
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('짱구계열\nzz1.com\nzz2.com\n\n짱구2계열\nzz3.com'));
+  t('붙여넣기 한 번으로 업체 2곳 + 주소 3개', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m.map((c) => c.name), ['누드티비', '파트너사', '짱구계열', '짱구2계열']);
+    assert.deepEqual(m[2].domains, ['zz1.com', 'zz2.com']);
+    assert.deepEqual(m[3].domains, ['zz3.com']);
+  });
+  t('새로 만든 업체를 분명히 알려준다', () => {
+    const txt = lastText(env);
+    assert.equal(/새 업체/.test(txt), true);
+    assert.equal(/짱구계열/.test(txt), true);
+  });
+  t('되돌리기 한 번으로 대량등록 전체가 사라진다', () => {
+    post(B, cbq('undo'));
+    post(B, cbqLast(env, 'undook'));
+    assert.deepEqual(B.loadModel_(), SEED);
+  });
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('누드티비 zz1.com 파트너사 zz2.com zz3.com'));
+  t('한 줄에 옆으로 나열해도 업체별로 갈라 넣는다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m[0].domains, ['egg-1.com', 'egg-5.com', 'zz1.com']);
+    assert.deepEqual(m[1].domains, ['ya-1.com', 'zz2.com', 'zz3.com']);
+    assert.equal(m.length, 2, '있는 업체를 또 만들면 안 된다');
+  });
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('추가 누드티비 zz1.com\n새업체 zz2.com'));
+  t('글 명령 추가에서도 업체가 여러 곳이면 나눠 넣는다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m[0].domains, ['egg-1.com', 'egg-5.com', 'zz1.com']);
+    assert.deepEqual(m[2], { name: '새업체', domains: ['zz2.com'] });
+  });
+}
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('add'));
+  post(B, cbqLast(env, 'a:0'));
+  post(B, msg('가업체\nzz1.com\n\n나업체\nzz2.com'));
+  t('주소 입력 단계에서 업체별 묶음을 붙여넣으면 그대로 나눠 넣는다', () => {
+    const m = B.loadModel_();
+    assert.deepEqual(m.map((c) => c.name), ['누드티비', '파트너사', '가업체', '나업체']);
+    assert.deepEqual(m[0].domains, ['egg-1.com', 'egg-5.com'], '고른 업체엔 아무것도 안 들어가야 한다');
+  });
+  t('고른 업체 대신 넣었다는 사실을 알려준다', () => assert.equal(/대신/.test(lastText(env)), true));
+}
+{
+  // 대량 작업의 이력은 한 줄, 백업도 한 번
+  const { env, B } = fresh(SEED);
+  post(B, msg('가업체\nzz1.com\nzz2.com\n\n나업체\nzz3.com'));
+  t('여러 업체 등록도 이력 한 줄', () => {
+    const rows = (env.sheets.get('이력') || { rows: [] }).rows.filter((r) => r[2] === '도메인 추가');
+    assert.equal(rows.length, 1);
+    assert.equal(/가업체/.test(rows[0][3]) && /나업체/.test(rows[0][3]), true);
+  });
+}
+{
+  // 채널 잡담 보호 — 업체 하나 + 주소 하나짜리 말은 여전히 무시한다
+  const { env, B } = fresh(SEED);
+  env.sent.length = 0;
+  post(B, msg('오늘 egg-9.com 확인해줘'));
+  t('잡담 속 주소 하나로는 업체를 만들지 않는다', () => {
+    assert.equal(env.sent.length, 0);
+    assert.deepEqual(B.loadModel_(), SEED);
+  });
+}
+{
+  const many = [];
+  for (let i = 0; i < 15; i++) many.push({ name: '업체' + i, domains: [] });
+  const { env, B } = fresh(many);
+  post(B, msg('열여섯번째\nzz1.com'));
+  t('업체 한도를 넘으면 그 묶음만 건너뛰고 알려준다', () => {
+    assert.equal(B.loadModel_().length, 15);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// 12-3. 메뉴 패널 문구 — '그때 결과'가 '지금 개수'로 읽히던 오해
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('LAST_RESULT_AT', '2026-08-28 11:00');
+  env.propStore.set('LAST_RESULT_SUMMARY', '등록된 도메인 없음');
+  post(B, msg('메뉴'));
+  const txt = lastText(env);
+  t('지금 개수와 점검 결과가 구분되게 보인다', () => {
+    assert.equal(/도메인 3개/.test(txt), true, '지금 등록 개수가 그대로 보여야 한다');
+    assert.equal(/그때 결과 · 등록된 도메인 없음/.test(txt), true);
+  });
+  t('목록을 고친 뒤 점검 안 했으면 알려준다', () =>
+    assert.equal(/아직 점검하지 않았습니다/.test(txt), true));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('LAST_RESULT_AT', '2099-01-01 00:00');
+  env.propStore.set('LAST_RESULT_SUMMARY', '✅ 정상 2');
+  post(B, msg('메뉴'));
+  t('점검이 최신이면 재촉하지 않는다', () =>
+    assert.equal(/아직 점검하지 않았습니다/.test(lastText(env)), false));
+}
+
+// ═══════════════════════════════════════════════════════════
 // 13. 문서 ↔ 코드 대조 — 설명서에 적힌 대로 실제로 동작하는가
 //     (문서와 코드가 어긋나면 비개발자는 그 자리에서 막힌다)
 // ═══════════════════════════════════════════════════════════

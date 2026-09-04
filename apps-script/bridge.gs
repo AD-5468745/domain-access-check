@@ -328,6 +328,8 @@ function saveModel_(model) {
   sh.setFrozenRows(1);
   try { sh.autoResizeColumns(1, cols); } catch (ignore) {}
   invalidateModel_();          // 쓰기 도중 다른 실행이 옛 값을 캐시했을 수 있다
+  // 마지막 점검 결과가 지금 목록과 맞는지 판단하는 근거(패널의 '아직 점검 안 함' 표시)
+  try { setProp_('LAST_CHANGE_AT', nowKst_()); } catch (ignoreStamp) {}
 }
 
 function totalDomains_(model) {
@@ -726,7 +728,10 @@ function menuText_() {
     '점검 시각 ' + s.hours.map(function (h) { return ('0' + h).slice(-2) + '시'; }).join(' · ') +
       (s.paused ? '  ⏸ 일시중지' : '') ,
     '마지막 점검 ' + esc_(prop_('LAST_RESULT_AT', '-')),
-    esc_(prop_('LAST_RESULT_SUMMARY', '아직 점검 기록이 없습니다')) + '</blockquote>',
+    // ★ 이 줄은 '지금 등록 개수'가 아니라 '그때 점검 결과'다.
+    //   라벨이 없어서 도메인 7개인데 "등록된 도메인 없음"으로 읽히는 오해가 있었다(2026-09-05).
+    '└ 그때 결과 · ' + esc_(prop_('LAST_RESULT_SUMMARY', '아직 점검 기록이 없습니다')) + '</blockquote>',
+    staleLine_(),
     '',
     speedLine_(),
     '',
@@ -741,6 +746,18 @@ function menuText_() {
  *   대기조가 자는 동안은 눌렸다는 사실 자체를 아무도 모르기 때문이다.
  *   그래서 누르기 '전에' 알 수 있게 패널에 상태를 적는다.
  */
+/**
+ * 목록을 고친 뒤 아직 점검하지 않았으면 알려준다.
+ * ★ 없으면 "도메인 7개"인데 "그때 결과 등록된 도메인 없음"이 나란히 보여 고장으로 읽힌다.
+ */
+function staleLine_() {
+  var changed = prop_('LAST_CHANGE_AT', '');
+  var checked = prop_('LAST_RESULT_AT', '');
+  if (!changed) return '';
+  if (checked && String(checked) >= String(changed)) return '';
+  return '\n<blockquote>🔄 <b>목록을 고친 뒤 아직 점검하지 않았습니다</b> — [🔍 지금 점검]</blockquote>';
+}
+
 function speedLine_() {
   if (mode_() === 'webhook') {
     return '<blockquote>⚡ <b>즉시 반응</b> — 누르면 바로 받습니다</blockquote>';
@@ -1099,6 +1116,128 @@ function bulkLines_(head, groups) {
 // ═══════════════════════════════════════════════════════════════════
 // 동작 — 여러 개 한 번에 (자물쇠·백업·저장·기록을 한 번만 한다)
 // ═══════════════════════════════════════════════════════════════════
+/**
+ * 붙여넣은 글을 '업체별 묶음'으로 가른다 — 여러 업체 × 여러 도메인을 한 번에.
+ *
+ *   짱구계열            ← 주소가 아닌 말 = 새 업체의 시작
+ *   a.com b.com        ← 그 아래(또는 옆)의 주소들이 그 업체 것
+ *
+ *   짱구2계열
+ *   c.com
+ *
+ * ★ 규칙 하나로 끝난다: "주소가 아닌 말이 나오면 새 업체가 시작된다."
+ *   그래서 줄바꿈으로 쓰든, 한 줄에 `업체 a.com b.com` 으로 쓰든 똑같이 알아듣는다.
+ *   업체 이름에 띄어쓰기가 있어도(우리 회사) 주소가 나오기 전까지는 이름으로 모은다.
+ */
+function parseGroups_(text) {
+  var toks = tokens_(text);
+  var groups = [], name = [], domains = [], bad = [];
+  function flush() {
+    if (domains.length) groups.push({ name: name.join(' '), domains: domains });
+    name = []; domains = [];
+  }
+  for (var i = 0; i < toks.length; i++) {
+    var d = normalizeDomain_(toks[i]);
+    if (d) { if (domains.indexOf(d) === -1) domains.push(d); continue; }
+    if (looksLikeDomain_(toks[i])) { bad.push(String(toks[i])); continue; }
+    if (domains.length) flush();     // 주소가 나온 뒤의 말 = 다음 업체 시작
+    name.push(String(toks[i]));
+  }
+  flush();
+  return { groups: groups, bad: bad };
+}
+
+/** 업체별 묶음을 한 번에 등록한다(자물쇠·백업·저장·기록을 한 번만). */
+function opAddGroups_(groups, actor) {
+  return withLock_(function () {
+    var model = loadModel_();
+    var out = [], touched = false;
+    function begin() { if (!touched) { snapshot_('추가'); touched = true; } }
+    for (var g = 0; g < groups.length; g++) {
+      var res = { company: groups[g].name, added: [], dup: [], bad: [], moved: [], created: false, error: '' };
+      var list = groups[g].domains;
+      var ci = findCompany_(model, groups[g].name);
+      if (ci === -1) {
+        var n = null;
+        try { n = validCompanyName_(groups[g].name); }
+        catch (e) { res.error = String(e.message || e); out.push(res); continue; }
+        if (model.length >= MAX_COMPANIES) {
+          res.error = '업체는 최대 ' + MAX_COMPANIES + '곳까지 등록할 수 있습니다.';
+          out.push(res); continue;
+        }
+        begin();
+        model.push({ name: n, domains: [] });
+        ci = model.length - 1;
+        res.company = n;
+        res.created = true;
+      } else {
+        res.company = model[ci].name;
+      }
+      for (var i = 0; i < list.length; i++) {
+        var d = list[i];
+        if (model[ci].domains.indexOf(d) !== -1) { res.dup.push(d); continue; }
+        if (model[ci].domains.length >= MAX_DOMAINS_PER_CO) {
+          res.bad.push(d + ' (한 업체에 최대 ' + MAX_DOMAINS_PER_CO + '개까지)'); continue;
+        }
+        var other = findDomain_(model, d);
+        if (other.length) res.moved.push(d + ' (〔' + model[other[0].ci].name + '〕에도 있음)');
+        begin();
+        model[ci].domains.push(d);
+        res.added.push(d);
+      }
+      out.push(res);
+    }
+    if (touched) {
+      saveModel_(model);
+      log_(actor, '도메인 추가',
+        out.filter(function (r) { return r.added.length; })
+           .map(function (r) { return '〔' + r.company + '〕 ' + r.added.join(', '); }).join(' / '));
+      sysWrite_();
+    }
+    return out;
+  });
+}
+
+/** 업체별 묶음 등록 결과를 담당자에게 보고한다. */
+function doAddGroups_(chatId, groups, actor, note) {
+  try {
+    var out = opAddGroups_(groups, actor);
+    var totalAdded = 0, madeCos = [];
+    for (var i = 0; i < out.length; i++) {
+      totalAdded += out[i].added.length;
+      if (out[i].created) madeCos.push(out[i].company);
+    }
+    var lines = ['✅ 업체 ' + out.length + '곳 · 주소 ' + totalAdded + '개 등록'];
+    if (madeCos.length) lines.push('🏢 새 업체: ' + esc_(madeCos.join(', ')));
+    for (var j = 0; j < out.length; j++) {
+      var r = out[j];
+      if (r.error) { lines.push('⚠️ 〔' + esc_(r.company) + '〕 ' + esc_(r.error)); continue; }
+      lines.push('');
+      lines.push('〔' + esc_(r.company) + '〕 +' + r.added.length + (r.created ? ' (새 업체)' : ''));
+      var cap = function (arr, tail) {
+        var o = arr.slice(0, 12).map(function (x) { return x + (tail || ''); });
+        if (arr.length > 12) o.push('… 외 ' + (arr.length - 12) + '개');
+        return o;
+      };
+      var k;
+      var addedL = cap(r.added);      for (k = 0; k < addedL.length; k++) lines.push('+ ' + esc_(addedL[k]));
+      var dupL = cap(r.dup, ' (이미 있음)');  for (k = 0; k < dupL.length; k++) lines.push('⏭ ' + esc_(dupL[k]));
+      var badL = cap(r.bad, ' (주소 형식이 아님)'); for (k = 0; k < badL.length; k++) lines.push('⚠️ ' + esc_(badL[k]));
+      var movL = cap(r.moved);        for (k = 0; k < movL.length; k++) lines.push('ℹ️ ' + esc_(movL[k]));
+    }
+    clearState_(chatId);
+    var tail = note ? '\n\n<blockquote>' + esc_(note) + '</blockquote>' : '';
+    var kb = totalAdded
+      ? { inline_keyboard: [[{ text: '🔍 지금 점검', callback_data: 'run' }, { text: '◀️ 메뉴로', callback_data: 'm' }]] }
+      : kbMain_();
+    return tgSend_(chatId, '<blockquote>' + lines.join('\n') + '</blockquote>' + tail +
+      '\n\n<blockquote>잘못됐으면 [↩️ 되돌리기] 한 번으로 이 등록 전체가 되돌아갑니다.</blockquote>', kb);
+  } catch (e) {
+    clearState_(chatId);
+    return tgSend_(chatId, '❌ ' + esc_(String(e.message || e)), kbMain_());
+  }
+}
+
 function opRemoveDomains_(rawList, companyName, actor) {
   return withLock_(function () {
     var model = loadModel_();
@@ -1394,6 +1533,12 @@ function handleTextCommand_(chatId, text, actor) {
 
   // ── 도메인 추가 — 주소는 몇 개든, 옆으로 나열하든 한 줄에 하나씩이든 된다
   if ((m = /^추가\s+([\s\S]+)$/.exec(t))) {
+    // 업체가 두 곳 이상 섞여 있으면 묶음별로 나눠 넣는다
+    var pg0 = parseGroups_(m[1]);
+    if (pg0.groups.length >= 2 && pg0.groups.every(function (g) { return !!g.name; })) {
+      return doAddGroups_(chatId, pg0.groups, actor,
+        pg0.bad.length ? '주소 형식이 아닌 ' + pg0.bad.length + '개는 건너뛰었습니다.' : '');
+    }
     var addToks = tokens_(m[1]);
     var lead = pickLeadingCompany_(loadModel_(), addToks);
     if (!lead.rest.length) {
@@ -1535,6 +1680,13 @@ function handleTextCommand_(chatId, text, actor) {
   var bulkList = bulk.ok.concat(bulk.bad);
   if (bulk.ok.length) {
     var model1 = loadModel_();
+    // ★ 업체 이름 + 주소들이 여러 묶음이면 그대로 여러 업체에 한 번에 넣는다
+    //   (담당자가 목록을 통째로 붙여넣는 실제 습관)
+    var pg = parseGroups_(t);
+    if (pg.groups.length >= 2 && pg.groups.every(function (g) { return !!g.name; })) {
+      return doAddGroups_(chatId, pg.groups, actor,
+        pg.bad.length ? '주소 형식이 아닌 ' + pg.bad.length + '개는 건너뛰었습니다.' : '');
+    }
     var wordText = bulk.words.join(' ');
     var coHit = wordText ? findCompany_(model1, wordText) : -1;
     if (coHit !== -1) return doAdd_(chatId, model1[coHit].name, bulkList, actor);
@@ -1670,6 +1822,12 @@ function askUndo_(chatId) {
 // 대화 중 입력 받기
 function handleStateInput_(chatId, st, text, actor) {
   if (st.op === 'add-input') {
+    // 업체별 묶음을 통째로 붙여넣었다면 고른 업체 대신 묶음대로 넣는다
+    var pgs = parseGroups_(text);
+    if (pgs.groups.length >= 2 && pgs.groups.every(function (g) { return !!g.name; })) {
+      return doAddGroups_(chatId, pgs.groups, actor,
+        '업체 이름이 함께 적혀 있어 〔' + st.company + '〕 대신 적으신 업체별로 넣었습니다.');
+    }
     // 옆으로 나열하든 한 줄에 하나씩이든 똑같이 받는다
     return doAdd_(chatId, st.company, tokens_(text), actor);
   }
