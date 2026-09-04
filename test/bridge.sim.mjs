@@ -1629,6 +1629,30 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('즉답은 기다리지 않고 쏘아 보낸다(처리를 늦추지 않게)', () => {
     assert.equal(/await answerNow/.test(RELAY_JS), false);
   });
+  // ★ 2026-09-05 실측 사고 — 점검이 "시트 브리지 read 오류: unauthorized" 로 통째로 실패.
+  //   POST 는 성공했는데(doPost 4.4초) 302 임시 답 주소에서 답을 못 받아 대체 GET 으로 넘어갔고,
+  //   그 GET 이 한국 VPN 을 지나며 잘려 잠금값 없이 doGet 이 실행됐다.
+  {
+    const CHECK_JS = fs.readFileSync(new URL('../check.js', import.meta.url), 'utf8');
+    t('점검도 넘김을 자동으로 따라가지 않는다(본문이 사라지는 길)', () => {
+      assert.equal(/redirect: 'manual'/.test(CHECK_JS), true);
+      assert.equal(/loc\.includes\('\/exec'\)/.test(CHECK_JS), true);
+    });
+    t('점검도 한 번 삐끗하면 다시 시도한다', () => {
+      assert.equal(/BRIDGE_TRIES\s*=\s*[2-9]/.test(CHECK_JS), true);
+      assert.equal(/for \(let i = 1; i <= BRIDGE_TRIES/.test(CHECK_JS), true);
+    });
+    t('본문이 사라진 unauthorized 를 다시 시도로 본다', () => {
+      assert.equal(/unauthorized\/i\.test/.test(CHECK_JS), true);
+    });
+    t('점검이 잠금값을 URL 에 붙이지 않는다(비밀값 노출·차단 경로 제거)', () => {
+      assert.equal(/token=\$\{encodeURIComponent/.test(CHECK_JS), false);
+      assert.equal(/function bridgeUrl\(/.test(CHECK_JS), false);
+    });
+    t('세 번 다 실패하면 어디를 봐야 하는지 알려준다', () => {
+      assert.equal(/SHEET_BRIDGE_TOKEN 과 앱스스크립트 ACCESS_TOKEN/.test(CHECK_JS), true);
+    });
+  }
   // ★ 에이든 지시(2026-09-05) — '잠시만요!' 팝업 문구는 즉답기·대기조가 같아야 한다
   t("즉답 팝업 문구가 '⏳ 잠시만요!' 로 같다", () => {
     const w = (WORKER_JS.match(/text: '([^']*잠시만요[^']*)'/) || [])[1];

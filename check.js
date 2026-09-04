@@ -148,58 +148,89 @@ async function verifyKoreaIp() {
   }
 }
 
-// 앱스스크립트 브리지 URL(토큰 포함) — 질의문자열 방식(호환용 대체 경로)
-function bridgeUrl(action) {
-  const sep = CFG.bridgeUrl.includes('?') ? '&' : '?';
-  return `${CFG.bridgeUrl}${sep}token=${encodeURIComponent(CFG.bridgeToken)}&action=${action}`;
-}
+// ═══════════════════════════════════════════════════════════════════
+// 앱스스크립트 브리지 호출
+// ★ 2026-09-05 실측 사고(실행 로그로 확인):
+//   POST /exec 는 제대로 실행됐는데(doPost 4.4초, 읽기 성공) 구글이 302 로 넘겨준
+//   '임시 답 주소'에서 답을 받아오지 못했다. 그러자 예전 대체 경로인
+//   `?token=...&action=read` GET 으로 넘어갔고, 한국 VPN 을 지나며 그 GET 이 잘려
+//   doGet 이 잠금값 없이 실행 → "unauthorized" 로 점검이 통째로 실패했다.
+//
+//   고친 방법(즉답기·대기조에서 이미 검증된 것과 같은 방식):
+//     ① 넘김(302)을 자동으로 따라가지 않는다 — 따라가면 POST 가 GET 으로 바뀌어
+//        본문(잠금값)이 사라진다. 넘김 주소가 /exec 로 되돌아오면 즉시 실패로 본다.
+//     ② 임시 답 주소를 직접 받아온다. 실패하면 처음부터 다시 POST 한다(최대 3번).
+//     ③ URL 에 잠금값을 붙이는 대체 경로는 없앴다 — 동작도 안 하고 비밀값이 URL 에 남는다.
+// ═══════════════════════════════════════════════════════════════════
+const BRIDGE_TRIES = 3;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * 브리지 호출은 POST + 본문에 토큰/동작을 담는다.
- * ★ 왜 GET 이 아닌가 — 한국 VPN 을 경유하면 `?token=...&action=read` 가 붙은 GET 이
- *   중간에서 404 로 잘렸다(2026-09-04 실측). 같은 계정의 다른 점검 시스템도
- *   같은 이유로 읽기·쓰기를 모두 POST 로 한다. 덤으로 URL 에 비밀값이 남지 않는다.
- */
-async function bridgePost(action, payload, timeoutMs) {
-  return fetchWithTimeout(CFG.bridgeUrl, {
+async function bridgeOnce(action, payload, timeoutMs) {
+  const res = await fetchWithTimeout(CFG.bridgeUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    redirect: 'follow',
+    redirect: 'manual',
     body: JSON.stringify({ token: CFG.bridgeToken, action, ...(payload || {}) }),
   }, timeoutMs);
+
+  let final = res;
+  if (res.status >= 300 && res.status < 400) {
+    const loc = res.headers.get('location') || '';
+    if (!loc) throw new Error('넘김 주소가 비어 있음');
+    if (loc.includes('/exec')) throw new Error('넘김이 제자리로 돌아옴(본문이 사라진다)');
+    final = await fetchWithTimeout(loc, { redirect: 'follow' }, timeoutMs);
+  }
+  if (!final.ok) throw new Error(`HTTP ${final.status}`);
+
+  const text = await final.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`답이 JSON 이 아님(HTTP ${final.status})`); }
+
+  // 본문이 중간에 사라지면 브리지는 'unauthorized' 로 답한다 — 잠금값이 틀린 것과 구분이 안 되므로
+  // 일단 다시 시도한다. 세 번 다 이러면 아래에서 두 가능성을 모두 알려준다.
+  if (data && data.ok === false && /unauthorized/i.test(String(data.error || ''))) {
+    throw new Error('UNAUTHORIZED');
+  }
+  return data;
 }
 
-// 시트 읽기(브리지 POST) → parseSheet + 담당자가 채널에서 바꾼 설정
-async function readDomains() {
-  let res;
-  try {
-    res = await bridgePost('read');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  } catch (e) {
-    // 대체 경로: 옛 배포(POST read 미지원)로도 돌아가게 GET 으로 한 번 더
-    console.error('[sheet] POST read 실패 → GET 으로 재시도:', safeMsg(e));
-    res = await fetchWithTimeout(bridgeUrl('read'), { redirect: 'follow' });
-    if (!res.ok) throw new Error(`시트 브리지 read 실패(HTTP ${res.status})`);
+async function bridgeCall(action, payload, timeoutMs) {
+  let last = null;
+  for (let i = 1; i <= BRIDGE_TRIES; i++) {
+    try { return await bridgeOnce(action, payload, timeoutMs); }
+    catch (e) {
+      last = e;
+      console.error(`[sheet] ${action} ${i}/${BRIDGE_TRIES} 실패: ${safeMsg(e)}`);
+      if (i < BRIDGE_TRIES) await sleep(800 * i);
+    }
   }
-  const data = await res.json();
-  if (!data.ok) throw new Error(`시트 브리지 read 오류: ${data.error || '알수없음'}`);
+  if (String(last && last.message) === 'UNAUTHORIZED') {
+    throw new Error('시트 브리지 ' + action + ' 실패: 잠금값이 다르거나 본문이 중간에 사라짐 ' +
+      '(GitHub SHEET_BRIDGE_TOKEN 과 앱스스크립트 ACCESS_TOKEN 이 같은지 확인)');
+  }
+  throw new Error(`시트 브리지 ${action} 실패: ${safeMsg(last)}`);
+}
+
+// 시트 읽기 → parseSheet + 담당자가 채널에서 바꾼 설정
+async function readDomains() {
+  const data = await bridgeCall('read');
+  if (!data || !data.ok) throw new Error(`시트 브리지 read 오류: ${(data && data.error) || '알수없음'}`);
   return { ...parseSheet(data.values || []), settings: data.settings || {} };
 }
 
-// 결과 쓰기(브리지 POST) — 시트 '결과' 탭 + '시스템' 탭 갱신용 meta 동봉
+// 결과 쓰기 — 시트 '결과' 탭 + '시스템' 탭 갱신용 meta 동봉
 async function writeResults(results, nowKst, meta) {
   const rows = buildSheetRows(results, nowKst);
-  const res = await bridgePost('write', { rows, meta: meta || {} });
-  if (!res.ok) throw new Error(`시트 브리지 write 실패(HTTP ${res.status})`);
-  const data = await res.json().catch(() => ({ ok: false }));
-  if (!data.ok) throw new Error(`시트 브리지 write 오류: ${data.error || '알수없음'}`);
+  const data = await bridgeCall('write', { rows, meta: meta || {} });
+  if (!data || !data.ok) throw new Error(`시트 브리지 write 오류: ${(data && data.error) || '알수없음'}`);
 }
 
 // 실행 실패를 브리지에 알림 → '시스템' 탭에 남고 감시장치가 풀린다
 async function reportFailure(message) {
   if (!CFG.bridgeUrl || !CFG.bridgeToken) return;
   try {
-    await bridgePost('fail', { error: safeMsg(message) }, 20000);
+    await bridgeCall('fail', { error: safeMsg(message) }, 20000);
   } catch { /* 실패 보고 실패는 무시 */ }
 }
 
