@@ -217,7 +217,7 @@ function settingsText_() {
 // ═══════════════════════════════════════════════════════════════════
 // 데이터 모델 — '접속점검' 탭 읽기/쓰기
 // ═══════════════════════════════════════════════════════════════════
-/** → [{name:'에그벳', domains:['a.com', ...]}, ...] */
+/** → [{name:'누드티비', domains:['a.com', ...]}, ...] */
 function loadModel_() {
   var sh = sheet_(SHEET_INPUT, true);
   var lastRow = Math.max(1, sh.getLastRow());
@@ -636,13 +636,13 @@ function helpText_() {
     '<blockquote>점검                     지금 점검',
     '목록                     전체 보기',
     '상태                     마지막 결과 다시 보기',
-    '추가 에그벳 a.com b.com   업체에 주소 추가',
+    '추가 누드티비 a.com b.com  업체에 주소 추가',
     '삭제 a.com               주소 삭제',
     '변경 a.com b.com         주소 갈아끼우기',
-    '이동 a.com 야옹이         다른 업체로 옮기기',
+    '이동 a.com 파트너사        다른 업체로 옮기기',
     '업체추가 새업체',
-    '업체삭제 에그벳',
-    '이름변경 에그벳 에그벳2',
+    '업체삭제 누드티비',
+    '이름변경 누드티비 누드티비2',
     '점검시각 9 21            매일 09시·21시로',
     '알림 문제만 / 알림 항상',
     '일시중지 / 재개',
@@ -1012,7 +1012,7 @@ function handleTextCommand_(chatId, text, actor) {
     var model1 = loadModel_();
     if (!model1.length) {
       setState_(chatId, { op: 'add-pick-newco', domains: pieces, by: actor, at: Date.now() });
-      return tgSend_(chatId, '🏢 등록된 업체가 없습니다. 이 주소를 넣을 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳   (취소: 취소)</blockquote>');
+      return tgSend_(chatId, '🏢 등록된 업체가 없습니다. 이 주소를 넣을 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
     }
     setState_(chatId, { op: 'add-pick-company', domains: pieces, by: actor, at: Date.now() });
     var head1 = picked.length === 1
@@ -1180,7 +1180,7 @@ function handleCallback_(cb) {
     if (!model.length) {
       // thenAdd: 업체를 만든 뒤 곧바로 주소 입력으로 이어간다(여기서 끊기면 셋업 첫 단계에서 막힌다)
       setState_(chatId, { op: 'co-add', thenAdd: true, by: actor, at: Date.now() });
-      return tgEdit_(chatId, mid, '🏢 등록된 업체가 없습니다. 먼저 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳\n업체를 만들면 바로 주소를 물어봅니다. (취소: 취소)</blockquote>');
+      return tgEdit_(chatId, mid, '🏢 등록된 업체가 없습니다. 먼저 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비\n업체를 만들면 바로 주소를 물어봅니다. (취소: 취소)</blockquote>');
     }
     return tgEdit_(chatId, mid, '➕ 어느 업체에 추가할까요?',
       kbCompanies_(model, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
@@ -1201,7 +1201,7 @@ function handleCallback_(cb) {
     setState_(chatId, (stn && stn.op === 'add-pick-company')
       ? { op: 'add-pick-newco', domains: stn.domains, by: actor, at: Date.now() }
       : { op: 'add-newco', by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳   (취소: 취소)</blockquote>');
+    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
   }
 
   if (head === 'del') {
@@ -1251,7 +1251,7 @@ function handleCallback_(cb) {
   }
   if (head === 'coa') {
     setState_(chatId, { op: 'co-add', by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 에그벳   (취소: 취소)</blockquote>');
+    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
   }
   if (head === 'cor') {
     if (!model.length) return tgEdit_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());

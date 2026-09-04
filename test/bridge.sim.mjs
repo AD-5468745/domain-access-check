@@ -197,8 +197,8 @@ function fresh(seed) {
 }
 
 const SEED = [
-  { name: '에그벳', domains: ['egg-1.com', 'egg-5.com'] },
-  { name: '야옹이', domains: ['ya-1.com'] },
+  { name: '누드티비', domains: ['egg-1.com', 'egg-5.com'] },
+  { name: '파트너사', domains: ['ya-1.com'] },
 ];
 
 function post(B, update, params) {
@@ -226,7 +226,7 @@ const lastText = (env) => {
   t('접속점검 탭 1행=업체명', () => {
     const f = fresh(SEED);
     const v = f.env.sheets.get('접속점검').rows;
-    assert.deepEqual(v[0], ['에그벳', '야옹이']);
+    assert.deepEqual(v[0], ['누드티비', '파트너사']);
     assert.equal(v[1][0], 'egg-1.com');
   });
   t('열 길이가 달라도 정상', () => {
@@ -240,7 +240,7 @@ const lastText = (env) => {
 // ═══════════════════════════════════════════════════════════
 {
   const { env, B } = fresh(SEED);
-  post(B, msg('추가 에그벳 https://WWW.Egg-9.com/promo egg-1.com 이건메모'));
+  post(B, msg('추가 누드티비 https://WWW.Egg-9.com/promo egg-1.com 이건메모'));
   const model = B.loadModel_();
   t('추가: 정규화되어 들어감', () => assert.equal(model[0].domains.indexOf('egg-9.com') !== -1, true));
   t('추가: 중복은 건너뜀', () => assert.equal(model[0].domains.filter((d) => d === 'egg-1.com').length, 1));
@@ -339,16 +339,16 @@ const lastText = (env) => {
 // ═══════════════════════════════════════════════════════════
 {
   const { env, B } = fresh(SEED);
-  post(B, msg('이름변경 에그벳 에그벳2'));
-  t('업체 이름 변경', () => assert.equal(B.loadModel_()[0].name, '에그벳2'));
+  post(B, msg('이름변경 누드티비 누드티비2'));
+  t('업체 이름 변경', () => assert.equal(B.loadModel_()[0].name, '누드티비2'));
   post(B, msg('이름변경 없는업체 x'));
   t('없는 업체 이름변경 안내', () => assert.equal(/그런 업체가 없습니다/.test(lastText(env)), true));
-  post(B, msg('이름변경 에그벳2 야옹이'));
-  t('중복 이름 거부', () => assert.equal(B.loadModel_()[0].name, '에그벳2'));
+  post(B, msg('이름변경 누드티비2 파트너사'));
+  t('중복 이름 거부', () => assert.equal(B.loadModel_()[0].name, '누드티비2'));
 }
 {
   const { env, B } = fresh(SEED);
-  post(B, msg('업체삭제 에그벳'));
+  post(B, msg('업체삭제 누드티비'));
   t('업체 삭제는 확인을 먼저 묻는다', () => {
     assert.equal(/삭제할까요/.test(lastText(env)), true);
     assert.equal(B.loadModel_().length, 2);
@@ -357,12 +357,12 @@ const lastText = (env) => {
   t('확인 후 업체와 도메인 함께 삭제', () => {
     const m = B.loadModel_();
     assert.equal(m.length, 1);
-    assert.equal(m[0].name, '야옹이');
+    assert.equal(m[0].name, '파트너사');
   });
 }
 {
   const { B } = fresh(SEED);
-  post(B, msg('이동 ya-1.com 에그벳'));
+  post(B, msg('이동 ya-1.com 누드티비'));
   t('업체 간 이동', () => {
     const m = B.loadModel_();
     assert.equal(m[0].domains.indexOf('ya-1.com') !== -1, true);
@@ -383,7 +383,7 @@ const lastText = (env) => {
   post(B, cbq('add'));
   t('업체 선택 버튼 제공', () => {
     const kb = env.sent[env.sent.length - 1].body.reply_markup.inline_keyboard;
-    assert.equal(JSON.stringify(kb).indexOf('에그벳') !== -1, true);
+    assert.equal(JSON.stringify(kb).indexOf('누드티비') !== -1, true);
   });
   post(B, cbq('a:0'));
   t('주소 입력 안내', () => assert.equal(/추가할 주소를 보내주세요/.test(lastText(env)), true));
@@ -490,7 +490,7 @@ const lastText = (env) => {
   const { B } = fresh(SEED);
   const ok = JSON.parse(B.doGet({ parameter: { token: 'tok', action: 'read' } }).text);
   t('read 성공', () => assert.equal(ok.ok, true));
-  t('read 가 1행 업체명 포함', () => assert.deepEqual(ok.values[0], ['에그벳', '야옹이']));
+  t('read 가 1행 업체명 포함', () => assert.deepEqual(ok.values[0], ['누드티비', '파트너사']));
   t('read 가 설정도 함께 전달', () => assert.deepEqual(ok.settings.hours, [9, 21]));
 
   const bad = JSON.parse(B.doGet({ parameter: { token: 'wrong', action: 'read' } }).text);
@@ -526,7 +526,7 @@ const lastText = (env) => {
 {
   const { env, B } = fresh(SEED);
   const rows = [['업체', '도메인', '상태', 'HTTP', '최종 접속주소', '응답(ms)', '점검시각', '비고'],
-    ['에그벳', 'egg-1.com', '✅ 정상', 200, 'https://egg-1.com/', 120, '2026-08-28 21:00', '정상']];
+    ['누드티비', 'egg-1.com', '✅ 정상', 200, 'https://egg-1.com/', 120, '2026-08-28 21:00', '정상']];
   const r = JSON.parse(B.doPost({
     parameter: { token: 'tok', action: 'write' },
     postData: { contents: JSON.stringify({ rows, meta: { nowKst: '2026-08-28 21:00', summary: '총 1개 모두 정상 ✅', report: '리포트' } }) },
@@ -652,7 +652,7 @@ const lastText = (env) => {
     assert.equal(kb.reduce((n, r) => n + r.length, 0), 8);
   });
   post(B, msg('목록'));
-  t('목록에 업체·도메인', () => assert.equal(/〔에그벳〕/.test(lastText(env)) && /egg-1\.com/.test(lastText(env)), true));
+  t('목록에 업체·도메인', () => assert.equal(/〔누드티비〕/.test(lastText(env)) && /egg-1\.com/.test(lastText(env)), true));
   post(B, msg('도움말'));
   t('도움말 표시', () => assert.equal(/사용법/.test(lastText(env)), true));
 }
@@ -708,7 +708,7 @@ const lastText = (env) => {
   const { env, B } = fresh();
   post(B, cbq('add'));
   t('업체 0곳: 업체 이름을 먼저 물어봄', () => assert.equal(/업체 이름을 보내주세요/.test(lastText(env)), true));
-  post(B, msg('에그벳'));
+  post(B, msg('누드티비'));
   t('업체 0곳: 만든 뒤 곧바로 주소를 물어봄', () => assert.equal(/추가할 주소를 보내주세요/.test(lastText(env)), true));
   post(B, msg('egg-1.com\negg-2.com'));
   t('업체 0곳: 주소가 실제로 들어감', () => {
@@ -862,7 +862,7 @@ const lastText = (env) => {
 // (8) 텔레그램 글로 업체 삭제할 때 동시작업 잠금이 안 걸리던 문제
 {
   const { env, B } = fresh(SEED);
-  post(B, msg('업체삭제 에그벳'));
+  post(B, msg('업체삭제 누드티비'));
   post(B, { callback_query: { id: 'z', data: 'del', from: { id: 8, first_name: '최담당' }, message: { chat: { id: '-1001' }, message_id: 9 } } });
   t('글로 시작한 확인 중에도 다른 사람 차단', () => assert.equal(/작업 중입니다/.test(lastText(env)), true));
 }
@@ -890,7 +890,7 @@ const lastText = (env) => {
   let bigReport = '🌐 접속점검 결과\n🕒 x\n';
   for (let i = 0; i < 400; i++) bigReport += `\n\n<blockquote>〔업체${i}〕\n❌ domain-${i}-아주긴한글도메인이름.example.com — 접속실패(타임아웃)</blockquote>`;
   const rows = [['업체', '도메인', '상태', 'HTTP', '최종 접속주소', '응답(ms)', '점검시각', '비고'],
-    ['에그벳', 'egg-1.com', '❌ 이상', '', '', 15000, 'x', '접속실패(타임아웃)']];
+    ['누드티비', 'egg-1.com', '❌ 이상', '', '', 15000, 'x', '접속실패(타임아웃)']];
   const r = JSON.parse(B.doPost({
     parameter: { token: 'tok', action: 'write' },
     postData: { contents: JSON.stringify({ rows, meta: { nowKst: 'x', summary: '총 1 · ❌1', report: bigReport } }) },
@@ -938,7 +938,7 @@ const lastText = (env) => {
   sh.rows[0][15] = '운영 메모';
   sh.rows[1] = sh.rows[1] || [];
   sh.rows[1][15] = '건드리면 안 됨';
-  post(B, msg('추가 에그벳 keep.com'));
+  post(B, msg('추가 누드티비 keep.com'));
   t('P열 메모 보존', () => {
     assert.equal(env.sheets.get('접속점검').rows[0][15], '운영 메모');
     assert.equal(env.sheets.get('접속점검').rows[1][15], '건드리면 안 됨');
@@ -997,13 +997,13 @@ const lastText = (env) => {
     ['점검', /점검을 시작합니다|실행 요청 실패/],
     ['목록', /등록된 도메인/],
     ['상태', /점검 기록이 없습니다|접속점검 결과/],
-    ['추가 에그벳 zz1.com', /추가|이미 있음/],
+    ['추가 누드티비 zz1.com', /추가|이미 있음/],
     ['삭제 zz1.com', /삭제됨|등록되지 않은/],
     ['변경 egg-1.com zz2.com', /→|등록되지 않은/],
-    ['이동 ya-1.com 에그벳', /→|그런 업체가 없습니다/],
+    ['이동 ya-1.com 누드티비', /→|그런 업체가 없습니다/],
     ['업체추가 테스트업체', /추가됨|이미 있는/],
     ['업체삭제 테스트업체', /삭제할까요|그런 업체가 없습니다/],
-    ['이름변경 야옹이 야옹이2', /→|그런 업체가 없습니다/],
+    ['이름변경 파트너사 파트너사2', /→|그런 업체가 없습니다/],
     ['점검시각 9 21', /점검 시각을/],
     ['알림 문제만', /알림 수준을/],
     ['알림 항상', /알림 수준을/],

@@ -80,15 +80,15 @@ t('다른사이트: TLD만 다름', () => assert.equal(sameSite('a.net', 'a.com'
 
 // ── 4. 시트 파싱 ────────────────────────────────────────────
 const grid = [
-  ['에그벳', '야옹이', '', '빈업체'],
+  ['누드티비', '파트너사', '', '빈업체'],
   ['a1.com', 'https://b1.com', 'c1.com', ''],
   ['A1.COM', '', '메모', ''],
   ['www.a2.com', 'b2.com/path', '', ''],
 ];
 const parsed = parseSheet(grid);
 t('업체별 도메인 개수', () => assert.equal(parsed.domains.length, 5));
-t('1행은 점검 안 함', () => assert.equal(parsed.domains.some((d) => d.domain === '에그벳'), false));
-t('업체명 매핑', () => assert.equal(parsed.domains[0].company, '에그벳'));
+t('1행은 점검 안 함', () => assert.equal(parsed.domains.some((d) => d.domain === '누드티비'), false));
+t('업체명 매핑', () => assert.equal(parsed.domains[0].company, '누드티비'));
 t('셀 좌표 기록', () => assert.equal(parsed.domains[0].cell, 'A2'));
 t('정규화 적용', () => assert.equal(parsed.domains.map((d) => d.domain).includes('a2.com'), true));
 t('업체 내 중복 제거', () => assert.equal(parsed.domains.filter((d) => d.domain === 'a1.com').length, 1));
@@ -96,7 +96,7 @@ t('중복은 skipped 기록', () => assert.equal(parsed.skipped.some((s) => s.re
 t('비도메인 skipped', () => assert.equal(parsed.skipped.some((s) => s.raw === '메모'), true));
 t('업체명 없는 열 기본이름', () => assert.equal(parsed.domains.some((d) => d.company === 'C열'), true));
 t('빈칸은 skipped 아님', () => assert.equal(parsed.skipped.some((s) => s.raw === ''), false));
-t('열 순서 유지', () => assert.equal(parsed.domains[0].company, '에그벳'));
+t('열 순서 유지', () => assert.equal(parsed.domains[0].company, '누드티비'));
 t('빈 시트', () => assert.deepEqual(parseSheet([]), { domains: [], skipped: [] }));
 t('헤더만 있는 시트', () => assert.equal(parseSheet([['업체']]).domains.length, 0));
 t('null 입력', () => assert.equal(parseSheet(null).domains.length, 0));
@@ -135,16 +135,16 @@ t('알수없는 오류', () => assert.equal(describeNetworkError({}).startsWith(
 
 // ── 7. 결과 탭 표 ───────────────────────────────────────────
 const results = [
-  { company: '에그벳', domain: 'egg-1.com', status: 'up', http: 200, finalUrl: 'https://egg-1.com/', ms: 120, note: '정상' },
-  { company: '에그벳', domain: 'egg-5.com', status: 'warn', http: 403, finalUrl: 'https://egg-5.com/', ms: 300, note: '제한응답(403)' },
-  { company: '에그벳', domain: 'egg-4841.com', status: 'down', http: null, finalUrl: '', ms: 15000, note: '접속실패(타임아웃)' },
-  { company: '야옹이', domain: 'ya-4917.com', status: 'redir', http: 200, finalUrl: 'https://ya-9002.com/', ms: 250, note: '주소확인(리다이렉트 감지)', redirectTo: 'ya-9002.com' },
+  { company: '누드티비', domain: 'egg-1.com', status: 'up', http: 200, finalUrl: 'https://egg-1.com/', ms: 120, note: '정상' },
+  { company: '누드티비', domain: 'egg-5.com', status: 'warn', http: 403, finalUrl: 'https://egg-5.com/', ms: 300, note: '제한응답(403)' },
+  { company: '누드티비', domain: 'egg-4841.com', status: 'down', http: null, finalUrl: '', ms: 15000, note: '접속실패(타임아웃)' },
+  { company: '파트너사', domain: 'ya-4917.com', status: 'redir', http: 200, finalUrl: 'https://ya-9002.com/', ms: 250, note: '주소확인(리다이렉트 감지)', redirectTo: 'ya-9002.com' },
 ];
 const rows = buildSheetRows(results, '2026-08-26 21:00');
 t('헤더 8칸', () => assert.equal(SHEET_HEADER.length, 8));
 t('헤더 첫 행', () => assert.deepEqual(rows[0], SHEET_HEADER));
 t('행 개수', () => assert.equal(rows.length, 5));
-t('업체 칸', () => assert.equal(rows[1][0], '에그벳'));
+t('업체 칸', () => assert.equal(rows[1][0], '누드티비'));
 t('도메인 칸', () => assert.equal(rows[1][1], 'egg-1.com'));
 t('상태 칸', () => assert.equal(rows[1][2], '✅ 정상'));
 t('제한 상태 칸', () => assert.equal(rows[2][2], '⚠️ 제한'));
@@ -168,7 +168,7 @@ t('헤더에 회차', () => assert.equal(rep.text.startsWith('🌐 접속점검 
 t('헤더에 시각', () => assert.equal(rep.text.includes('🕒 2026-08-26 21:00 KST'), true));
 t('요약 줄', () => assert.equal(rep.text.includes('✅ 정상 1 · ⚠️ 제한 1 · ❌ 이상 1 · 🔀 주소확인 1'), true));
 t('확인 필요 문구', () => assert.equal(rep.text.includes('⚠️ 확인 필요'), true));
-t('업체 머리표', () => assert.equal(rep.text.includes('〔에그벳〕'), true));
+t('업체 머리표', () => assert.equal(rep.text.includes('〔누드티비〕'), true));
 t('리다이렉트 화살표', () => assert.equal(rep.text.includes('→ ya-9002.com'), true));
 t('정상 도메인은 본문에 없음', () => assert.equal(rep.text.includes('egg-1.com'), false));
 t('인용태그 짝 맞음', () => assert.equal(
@@ -189,7 +189,7 @@ t('도메인 0개', () => assert.equal(buildTelegramReport([], { nowKst: 'x', ro
 t('HTML 이스케이프', () => assert.equal(
   buildTelegramReport([{ company: 'A<b>&', domain: 'x.com', status: 'down', note: 'e' }], {}).text.includes('A&lt;b&gt;&amp;'), true));
 t('countByStatus 알수없는 상태는 이상', () => assert.equal(countByStatus([{ status: 'zzz' }]).down, 1));
-t('groupProblems 업체 순서 유지', () => assert.deepEqual(groupProblems(results).map((g) => g.company), ['에그벳', '야옹이']));
+t('groupProblems 업체 순서 유지', () => assert.deepEqual(groupProblems(results).map((g) => g.company), ['누드티비', '파트너사']));
 t('groupProblems 정상 제외', () => assert.equal(groupProblems(results)[0].items.length, 2));
 t('escapeHtml', () => assert.equal(escapeHtml('<&>'), '&lt;&amp;&gt;'));
 
@@ -262,8 +262,8 @@ await ta('응답시간 기록', async () => {
   assert.equal(typeof r.ms === 'number' && r.ms >= 0, true);
 });
 await ta('업체명 유지', async () => {
-  const r = await checkOne({ company: '에그벳', domain: 'a.com' }, { fetchImpl: async () => mkRes(200, 'https://a.com/') });
-  assert.equal(r.company, '에그벳');
+  const r = await checkOne({ company: '누드티비', domain: 'a.com' }, { fetchImpl: async () => mkRes(200, 'https://a.com/') });
+  assert.equal(r.company, '누드티비');
 });
 await ta('checkMany 순서 유지', async () => {
   const list = Array.from({ length: 30 }, (_, i) => ({ company: 'A', domain: `d${i}.com` }));
