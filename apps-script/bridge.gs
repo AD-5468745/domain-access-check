@@ -1342,6 +1342,17 @@ function handleTelegram_(e) {
 
   // 수정된 글(edited_*)은 명령으로 처리하지 않는다 — 옛 글을 고쳐서 다시 실행되는 사고 방지
   var msg = update.message || update.channel_post;
+
+  // ★ 진단용 흔적 — 무엇이 도착했는지 남긴다(비밀값 없음). '왜 답이 없나'를 추측 대신 사실로 본다.
+  try {
+    var kinds = [];
+    for (var kk in update) if (kk !== 'update_id') kinds.push(kk);
+    setProp_('LAST_UPDATE_DEBUG', nowKst_() + ' | 종류=' + kinds.join(',') +
+      ' | chat=' + String((msg && msg.chat && msg.chat.id) || '없음') +
+      ' | 글=' + String((msg && msg.text) || '').slice(0, 30) +
+      ' | 허용=' + (canControl_(String((msg && msg.chat && msg.chat.id) || '')) ? 'Y' : 'N'));
+  } catch (ignoreDbg) {}
+
   if (!msg || !msg.text) return json_({ ok: true, ignored: 'no text' });
 
   var chatId = String((msg.chat && msg.chat.id) || '');
@@ -1423,6 +1434,7 @@ function doPost(e) {
     // ★ read 를 POST 로도 받는다 — 한국 VPN 에서 GET 이 막히는 경우의 정식 경로.
     if (action === 'read') return json_(readPayload_());
     if (action === 'ping') return json_({ ok: true, pong: true });
+    if (action === 'diag') return json_(diag_());
     if (action === 'write') {
       writeResults_(body.rows || [], body.meta || {});
       return json_({ ok: true, written: Math.max(0, (body.rows || []).length - 1) });
@@ -1546,6 +1558,55 @@ function deleteWebhook() {
   if (!bot) throw new Error('BOT_TOKEN 속성이 없습니다');
   var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/deleteWebhook', { muteHttpExceptions: true });
   Logger.log('deleteWebhook → ' + res.getContentText());
+}
+
+/**
+ * 진단 — 왜 명령이 안 먹는지 사실로 확인한다(비밀값은 전부 가린다).
+ * 웹앱: POST {token, action:'diag'}
+ */
+function diag_() {
+  var out = { ok: true, at: nowKst_() };
+  out.allowedChats = allowedChats_();
+  out.lastUpdate = prop_('LAST_UPDATE_DEBUG', '(아직 없음)');
+  out.lastError = prop_('LAST_ERROR', '(없음)');
+  out.settings = settings_();
+  out.props = {};
+  var names = ['ACCESS_TOKEN', 'BOT_TOKEN', 'GITHUB_TOKEN', 'WEBHOOK_SECRET', 'WEBAPP_URL', 'GITHUB_REPO'];
+  for (var i = 0; i < names.length; i++) {
+    var v = prop_(names[i], '');
+    out.props[names[i]] = v ? ('설정됨(' + String(v).length + '자)') : '없음';
+  }
+  try {
+    var bot = prop_('BOT_TOKEN');
+    if (bot) {
+      var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/getWebhookInfo', { muteHttpExceptions: true });
+      var info = JSON.parse(res.getContentText());
+      var r = (info && info.result) || {};
+      out.webhook = {
+        설정됨: !!r.url,
+        주소: String(r.url || '').replace(/token=[^&]*/g, 'token=***').replace(/[?&]s=[^&]*/g, '&s=***'),
+        대기중인_업데이트: r.pending_update_count,
+        허용된_종류: r.allowed_updates || '(전체 기본값)',
+        마지막_오류: r.last_error_message || '(없음)',
+        마지막_오류시각: r.last_error_date || null,
+      };
+      // 봇이 채널에서 실제로 무엇을 할 수 있는지
+      var ids = allowedChats_();
+      if (ids.length) {
+        var me = JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/getMe', { muteHttpExceptions: true }).getContentText());
+        var myId = me && me.result && me.result.id;
+        out.bot = { 이름: me && me.result && me.result.username, 그룹메시지_전체수신: me && me.result && me.result.can_read_all_group_messages };
+        if (myId) {
+          var cm = JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/getChatMember?chat_id=' +
+            encodeURIComponent(ids[0]) + '&user_id=' + myId, { muteHttpExceptions: true }).getContentText());
+          out.botInChannel = cm && cm.ok ? { 자격: cm.result.status, 글쓰기: cm.result.can_post_messages } : { 오류: cm && cm.description };
+        }
+      }
+    }
+  } catch (e) {
+    out.webhookError = String(e && e.message || e);
+  }
+  return out;
 }
 
 /** 시트가 제대로 읽히는지 확인 */
