@@ -509,6 +509,11 @@ function tgStripButtons_(chatId, messageId) {
   } catch (ignore) {}
 }
 
+/** 방금 보낸 메시지의 번호(없으면 0). 확인 버튼의 '주인'을 가릴 때 쓴다. */
+function sentMid_(res) {
+  return (res && res.result && res.result.message_id) || 0;
+}
+
 function tgAnswer_(cbId, text) {
   tgApi_('answerCallbackQuery', { callback_query_id: cbId, text: text || '' });
 }
@@ -1061,10 +1066,11 @@ function handleTextCommand_(chatId, text, actor) {
     var model0 = loadModel_();
     var ci0 = findCompany_(model0, m[1]);
     if (ci0 === -1) return tgSend_(chatId, '❌ 그런 업체가 없습니다: ' + esc_(m[1]), kbMain_());
-    setState_(chatId, { op: 'codel-confirm', name: model0[ci0].name, by: actor, at: Date.now(), mid: 0 });
-    return tgSend_(chatId,
+    var tsent = tgSend_(chatId,
       '🗑 업체 〔' + esc_(model0[ci0].name) + '〕 를 도메인 ' + model0[ci0].domains.length + '개와 함께 삭제할까요?',
       { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
+    setState_(chatId, { op: 'codel-confirm', name: model0[ci0].name, by: actor, at: Date.now(), mid: sentMid_(tsent) });
+    return tsent;
   }
   if ((m = /^이름변경\s+(\S+)\s+(.+)$/.exec(t))) {
     try {
@@ -1298,9 +1304,13 @@ function handleCallback_(cb) {
   if (head === 'dx') {
     var c1 = Number(parts[1]), d1 = Number(parts[2]);
     if (!model[c1] || !model[c1].domains[d1]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
-    setState_(chatId, { op: 'del-confirm', company: model[c1].name, domain: model[c1].domains[d1], by: actor, at: Date.now(), mid: mid });
-    return tgReply_(chatId, mid, '🗑 〔' + esc_(model[c1].name) + '〕 <b>' + esc_(model[c1].domains[d1]) + '</b> 을(를) 삭제할까요?',
+    // ★ 확인 메시지는 '새 메시지'로 나간다(2026-09-05 변경).
+    //   그래서 담당자가 실제로 누를 메시지는 방금 보낸 그것이다 —
+    //   옛 메시지 번호를 저장하면 항상 '지난 확인 버튼입니다'로 막힌다.
+    var dsent = tgReply_(chatId, mid, '🗑 〔' + esc_(model[c1].name) + '〕 <b>' + esc_(model[c1].domains[d1]) + '</b> 을(를) 삭제할까요?',
       { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'dok' }, { text: '아니오', callback_data: 'x' }]] });
+    setState_(chatId, { op: 'del-confirm', company: model[c1].name, domain: model[c1].domains[d1], by: actor, at: Date.now(), mid: sentMid_(dsent) });
+    return dsent;
   }
   if (head === 'dok') {
     var std = getState_(chatId);
@@ -1343,9 +1353,10 @@ function handleCallback_(cb) {
   if (head === 'codp') {
     var xi = Number(parts[1]);
     if (!model[xi]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
-    setState_(chatId, { op: 'codel-confirm', name: model[xi].name, by: actor, at: Date.now(), mid: mid });
-    return tgReply_(chatId, mid, '🗑 업체 〔' + esc_(model[xi].name) + '〕 를 도메인 ' + model[xi].domains.length + '개와 함께 삭제할까요?',
+    var csent = tgReply_(chatId, mid, '🗑 업체 〔' + esc_(model[xi].name) + '〕 를 도메인 ' + model[xi].domains.length + '개와 함께 삭제할까요?',
       { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
+    setState_(chatId, { op: 'codel-confirm', name: model[xi].name, by: actor, at: Date.now(), mid: sentMid_(csent) });
+    return csent;
   }
   if (head === 'codelok') {
     var stc = getState_(chatId);

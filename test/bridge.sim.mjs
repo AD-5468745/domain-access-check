@@ -111,7 +111,8 @@ function makeEnv() {
         sent.push({ method, body });
         // 테스트가 응답을 갈아끼울 수 있게(폴링 검증용). 기본은 성공.
         const custom = envRef.tgReply ? envRef.tgReply(method, url, body) : null;
-        const out = custom || { ok: true, result: { message_id: sent.length } };
+        const out = custom || { ok: true, result: { message_id: 1000 + sent.length } };
+        body.__mid = out.result && out.result.message_id;
         return { getResponseCode: () => 200, getContentText: () => JSON.stringify(out) };
       }
       if (url.indexOf('api.github.com') !== -1) {
@@ -217,7 +218,16 @@ function post(B, update, params) {
   });
 }
 const msg = (text, chat = '-1001') => ({ channel_post: { chat: { id: chat }, message_id: 1, text, author_signature: '김담당' } });
-const cbq = (data, chat = '-1001') => ({ callback_query: { id: 'c1', data, from: { id: 7, first_name: '박담당' }, message: { chat: { id: chat }, message_id: 9 } } });
+const cbq = (data, chat = '-1001', messageId = 9) => ({ callback_query: { id: 'c1', data, from: { id: 7, first_name: '박담당' }, message: { chat: { id: chat }, message_id: messageId } } });
+/** 마지막으로 봇이 보낸 메시지의 번호 — 담당자가 실제로 누르는 그 메시지다 */
+const lastMid = (env) => {
+  for (let i = env.sent.length - 1; i >= 0; i--) {
+    if (env.sent[i].method === 'sendMessage') return env.sent[i].body.__mid;
+  }
+  return 9;
+};
+/** 방금 온 메시지의 버튼을 누른다(실제 사용 방식) */
+const cbqLast = (env, data, chat = '-1001') => cbq(data, chat, lastMid(env));
 // ★ 깃허브로 나간 요청 중 '점검'만 센다 — 대기조 깨우기가 섞이면 숫자가 어긋난다.
 const checkRuns = (env) => env.github.filter((g) => /check\.yml/.test(g.url));
 const relayRuns = (env) => env.github.filter((g) => /relay\.yml/.test(g.url));
@@ -334,10 +344,10 @@ const lastText = (env) => {
   const { env, B } = fresh(SEED);
   post(B, cbq('del'));
   post(B, cbq('d:0'));
-  post(B, cbq('dx:0:1'));
+  post(B, cbqLast(env, 'dx:0:1'));
   t('버튼 삭제: 확인 단계 표시', () => assert.equal(/삭제할까요/.test(lastText(env)), true));
   t('버튼 삭제: 확인 전엔 안 지워짐', () => assert.equal(B.loadModel_()[0].domains.length, 2));
-  post(B, cbq('dok'));
+  post(B, cbqLast(env, 'dok'));
   t('버튼 삭제: 확인 후 지워짐', () => assert.deepEqual(B.loadModel_()[0].domains, ['egg-1.com']));
   t('버튼 삭제: 누가 눌렀는지 이력에 남음', () => {
     const log = env.sheets.get('이력').rows;
@@ -372,7 +382,7 @@ const lastText = (env) => {
     assert.equal(/삭제할까요/.test(lastText(env)), true);
     assert.equal(B.loadModel_().length, 2);
   });
-  post(B, cbq('codelok'));
+  post(B, cbqLast(env, 'codelok'));
   t('확인 후 업체와 도메인 함께 삭제', () => {
     const m = B.loadModel_();
     assert.equal(m.length, 1);
@@ -774,6 +784,30 @@ const lastText = (env) => {
   });
 }
 
+// ★ 2026-09-05 실측 사고 재현 방지 — 삭제가 통째로 막혔다.
+//   버튼 응답을 '새 메시지'로 바꾸면서, 확인 메시지 번호를 '누른 옛 메시지 번호'로
+//   저장해 담당자가 실제로 누르는 새 메시지와 항상 어긋났다.
+//   증상: [예, 삭제] 를 눌러도 매번 "지난 확인 버튼입니다. 새로 시작해 주세요."
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbqLast(env, 'del'));
+  post(B, cbqLast(env, 'd:0'));
+  post(B, cbqLast(env, 'dx:0:1'));
+  t('삭제 확인을 묻는다', () => assert.equal(/삭제할까요/.test(lastText(env)), true));
+  post(B, cbqLast(env, 'dok'));
+  t('방금 온 확인 버튼은 반드시 통한다', () => assert.equal(/지난 확인 버튼/.test(lastText(env)), false));
+  t('실제로 지워진다', () => assert.deepEqual(B.loadModel_()[0].domains, ['egg-1.com']));
+}
+{
+  // 업체 관리 → 삭제도 같은 경로
+  const { env, B } = fresh(SEED);
+  post(B, cbqLast(env, 'cod'));
+  post(B, cbqLast(env, 'codp:1'));
+  post(B, cbqLast(env, 'codelok'));
+  t('업체 삭제도 방금 온 확인 버튼으로 통한다', () => assert.equal(/지난 확인 버튼/.test(lastText(env)), false));
+  t('업체가 실제로 지워진다', () => assert.deepEqual(B.loadModel_().map((c) => c.name), ['누드티비']));
+}
+
 // ═══════════════════════════════════════════════════════════
 // 11-4. 패널을 쉽게 부르기
 // ═══════════════════════════════════════════════════════════
@@ -1030,7 +1064,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   const { env, B } = fresh(SEED);
   post(B, cbq('del'));
   post(B, cbq('d:0'));
-  post(B, cbq('dx:0:1'));
+  post(B, cbqLast(env, 'dx:0:1'));
   post(B, msg('메뉴'));
   t('확인 대기 중 다른 말 → 취소 안내가 나옴', () => assert.equal(/취소했습니다/.test(lastText(env)), true));
   t('확인 대기 중 다른 말 → 삭제되지 않음', () => assert.deepEqual(B.loadModel_(), SEED));
@@ -1132,9 +1166,9 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
 
 // (13) 삭제로 업체가 줄어도 옛 열이 남지 않는다
 {
-  const { B } = fresh([{ name: 'A', domains: ['a.com'] }, { name: 'B', domains: ['b.com'] }, { name: 'C', domains: ['c.com'] }]);
+  const { env, B } = fresh([{ name: 'A', domains: ['a.com'] }, { name: 'B', domains: ['b.com'] }, { name: 'C', domains: ['c.com'] }]);
   post(B, msg('업체삭제 B'));
-  post(B, cbq('codelok'));
+  post(B, cbqLast(env, 'codelok'));
   t('가운데 업체 삭제 후 목록이 정확', () => assert.deepEqual(B.loadModel_().map((c) => c.name), ['A', 'C']));
   t('삭제 후 도메인도 정확', () => assert.deepEqual(B.loadModel_().map((c) => c.domains), [['a.com'], ['c.com']]));
 }
