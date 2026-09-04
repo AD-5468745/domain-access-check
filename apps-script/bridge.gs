@@ -111,12 +111,32 @@ function normalizeDomain_(raw) {
 // ═══════════════════════════════════════════════════════════════════
 function props_() { return PropertiesService.getScriptProperties(); }
 
-function prop_(key, fallback) {
-  var v = props_().getProperty(key);
-  return (v === null || v === '') ? (fallback === undefined ? '' : fallback) : v;
+/**
+ * ★ 설정값 읽기는 한 번 실행에 스무 번 넘게 일어난다. 그때마다 구글에 물어보면
+ *   그것만으로 몇 초가 쌓인다(2026-09-05 반응 지연 원인 중 하나).
+ *   실행 한 번 동안은 통째로 한 번만 읽어 기억해 둔다.
+ *   실행이 끝나면 사라지므로 '옛 값이 남는' 문제가 없다.
+ */
+var PROP_MEMO = null;
+
+function propAll_() {
+  if (!PROP_MEMO) {
+    try { PROP_MEMO = props_().getProperties() || {}; }
+    catch (e) { PROP_MEMO = {}; }
+  }
+  return PROP_MEMO;
 }
 
-function setProp_(key, value) { props_().setProperty(key, String(value)); }
+function prop_(key, fallback) {
+  var all = propAll_();
+  var v = Object.prototype.hasOwnProperty.call(all, key) ? all[key] : null;
+  return (v === null || v === undefined || v === '') ? (fallback === undefined ? '' : fallback) : v;
+}
+
+function setProp_(key, value) {
+  props_().setProperty(key, String(value));
+  propAll_()[key] = String(value);      // 기억해 둔 값도 같이 갱신(같은 실행 안에서 어긋나지 않게)
+}
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
@@ -223,8 +243,32 @@ function settingsText_() {
 // ═══════════════════════════════════════════════════════════════════
 // 데이터 모델 — '접속점검' 탭 읽기/쓰기
 // ═══════════════════════════════════════════════════════════════════
+/**
+ * ★ 시트 읽기는 이 시스템에서 가장 비싼 동작이다(한 번에 1~3초).
+ *   버튼 한 번에 이 읽기가 두세 번 일어나 반응이 느렸다(2026-09-05 실측: 한 건 7~19초).
+ *   그래서 아주 짧게 캐시한다 — 봇으로 고치면 즉시 무효화되므로 담당자는 항상 최신을 본다.
+ *   사람이 시트를 직접 고친 경우에만 최대 MODEL_CACHE_SEC 초 동안 옛 목록이 보일 수 있다.
+ */
+var MODEL_CACHE_SEC = 25;
+var MODEL_CACHE_KEY = 'model:v1';
+
+function invalidateModel_() {
+  try { cache_().remove(MODEL_CACHE_KEY); } catch (ignore) {}
+}
+
 /** → [{name:'누드티비', domains:['a.com', ...]}, ...] */
 function loadModel_() {
+  try {
+    var hit = cache_().get(MODEL_CACHE_KEY);
+    if (hit) return JSON.parse(hit);
+  } catch (ignore) {}
+  var fresh = readModel_();
+  try { cache_().put(MODEL_CACHE_KEY, JSON.stringify(fresh), MODEL_CACHE_SEC); } catch (ignore2) {}
+  return fresh;
+}
+
+/** 시트에서 진짜로 읽어온다(캐시를 거치지 않는다) */
+function readModel_() {
   var sh = sheet_(SHEET_INPUT, true);
   var lastRow = Math.max(1, sh.getLastRow());
   var lastCol = Math.min(Math.max(1, sh.getLastColumn()), MAX_COMPANIES);
@@ -246,6 +290,7 @@ function loadModel_() {
 }
 
 function saveModel_(model) {
+  invalidateModel_();          // 고쳤으면 캐시는 즉시 버린다
   var sh = sheet_(SHEET_INPUT, true);
   var maxLen = 0;
   for (var i = 0; i < model.length; i++) maxLen = Math.max(maxLen, model[i].domains.length);
@@ -271,6 +316,7 @@ function saveModel_(model) {
   sh.getRange(1, 1, 1, cols).setFontWeight('bold').setBackground('#E8F0FE');
   sh.setFrozenRows(1);
   try { sh.autoResizeColumns(1, cols); } catch (ignore) {}
+  invalidateModel_();          // 쓰기 도중 다른 실행이 옛 값을 캐시했을 수 있다
 }
 
 function totalDomains_(model) {
@@ -316,6 +362,7 @@ function snapshot_(label) {
 }
 
 function undo_() {
+  invalidateModel_();          // 시트를 직접 되돌리므로 캐시도 함께 버린다
   var bk = sheet_(SHEET_BACKUP, false);
   if (!bk || bk.getLastRow() < 1) throw new Error('되돌릴 내용이 없습니다.');
   var v = bk.getRange(1, 1, bk.getLastRow(), Math.max(1, bk.getLastColumn())).getDisplayValues();
@@ -332,6 +379,7 @@ function undo_() {
   bk.clearContents();
   bk.getRange(1, 1, curV.length, curV[0].length).setValues(curV);
 
+  invalidateModel_();
   var label = prop_('UNDO_LABEL', '변경');
   setProp_('UNDO_LABEL', '되돌리기');
   return label;
@@ -490,6 +538,29 @@ function tgSend_(chatId, text, keyboard) {
  *   — 옛 버튼을 다시 눌러 같은 화면이 계속 쌓이는 것을 막는다.
  */
 function tgReply_(chatId, messageId, text, keyboard) {
+  // ★ '새 메시지 보내기'와 '옛 버튼 떼기'는 서로 기다릴 이유가 없다.
+  //   한 번에 같이 보내면 왕복 한 번 분량(약 0.5~1초)을 아낀다.
+  var parts = splitForTelegram_(text);
+  if (parts.length === 1 && messageId) {
+    var bot = prop_('BOT_TOKEN');
+    if (bot) {
+      var base = 'https://api.telegram.org/bot' + bot + '/';
+      var reqs = [
+        { url: base + 'sendMessage', method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+          payload: JSON.stringify({ chat_id: chatId, text: text, parse_mode: 'HTML',
+            disable_web_page_preview: true, reply_markup: keyboard || { inline_keyboard: [] } }) },
+        { url: base + 'editMessageReplyMarkup', method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+          payload: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }) },
+      ];
+      try {
+        var res = UrlFetchApp.fetchAll(reqs);
+        var body = null;
+        try { body = JSON.parse(res[0].getContentText()); } catch (e) { body = null; }
+        if (body && body.ok) return body;
+        // 서식 문제 등으로 실패하면 기존 경로(재시도 포함)로 확실히 전달한다
+      } catch (ignore) {}
+    }
+  }
   var sent = tgSend_(chatId, text, keyboard);
   tgStripButtons_(chatId, messageId);
   return sent;
@@ -777,6 +848,7 @@ function clearWatchdog_() {
 }
 
 function watchdog() {
+  PROP_MEMO = null;
   clearWatchdog_();
   if (prop_('RUN_STATE', '대기') !== '실행중') return;
   setProp_('RUN_STATE', '무응답');
@@ -793,6 +865,7 @@ function watchdog() {
 
 /** 매시간 실행 — 설정된 시각이면 점검 요청 */
 function hourlyTick() {
+  PROP_MEMO = null;
   try {
     checkTokenExpiry_();
     var s = settings_();
@@ -1484,6 +1557,7 @@ function handleTelegram_(e) {
  * 대가: 최대 1분 지연. 대신 명령이 사라지지 않는다.
  */
 function pollUpdates() {
+  PROP_MEMO = null;
   var bot = prop_('BOT_TOKEN');
   if (!bot) return;
 
@@ -1570,6 +1644,7 @@ function readPayload_() {
 }
 
 function doGet(e) {
+  PROP_MEMO = null;          // 새 요청 — 설정값을 다시 읽는다
   try {
     if (!authorized_(e)) return json_({ ok: false, error: 'unauthorized' });
     var action = (e.parameter.action || 'read');
@@ -1582,6 +1657,7 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  PROP_MEMO = null;          // 새 요청 — 설정값을 다시 읽는다
   try {
     // 텔레그램 웹훅은 본문이 '업데이트'라 미리 파싱해도 해가 없다.
     var isTg = !!(e && e.parameter && e.parameter.action === 'tg');

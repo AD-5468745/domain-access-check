@@ -41,7 +41,7 @@ function makeEnv() {
         }
         return out;
       },
-      getDisplayValues() { return api.getValues().map((row) => row.map((v) => (v === null || v === undefined ? '' : String(v)))); },
+      getDisplayValues() { envRef.sheetReads = (envRef.sheetReads || 0) + 1; return api.getValues().map((row) => row.map((v) => (v === null || v === undefined ? '' : String(v)))); },
       setValues(vals) {
         pad(sh, r0 - 1 + vals.length, c0 - 1 + (vals[0] ? vals[0].length : 0));
         for (let r = 0; r < vals.length; r++) {
@@ -87,6 +87,8 @@ function makeEnv() {
   const PropertiesService = {
     getScriptProperties: () => ({
       getProperty: (k) => (propStore.has(k) ? propStore.get(k) : null),
+      // 실제 코드는 한 번에 통째로 읽어 캐시한다(요청당 1회) — 시뮬도 같은 길을 탄다
+      getProperties: () => Object.fromEntries(propStore),
       setProperty: (k, v) => { propStore.set(k, String(v)); },
     }),
   };
@@ -103,6 +105,10 @@ function makeEnv() {
 
   const envRef = {};                       // 아래에서 만든 env 를 가리킨다(테스트가 응답을 바꿔 끼울 수 있게)
   const UrlFetchApp = {
+    // ★ 실제 코드가 '보내기 + 옛 버튼 떼기'를 동시에 보내는 경로. 시뮬도 같은 길을 타야 한다.
+    fetchAll(reqs) {
+      return reqs.map((r) => UrlFetchApp.fetch(r.url, r));
+    },
     fetch(url, opts) {
       const body = opts && opts.payload ? JSON.parse(opts.payload) : {};
       if (url.indexOf('api.telegram.org') !== -1) {
@@ -809,6 +815,48 @@ const lastText = (env) => {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 11-3-2. 반응 속도 — 시트 읽기 줄이기 (2026-09-05: 한 건 7~19초였다)
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  env.sheetReads = 0;
+  post(B, cbqLast(env, 'list'));
+  const first = env.sheetReads;
+  env.sheetReads = 0;
+  post(B, cbqLast(env, 'list'));
+  t('같은 조회를 되풀이해도 시트를 다시 읽지 않는다', () => assert.equal(env.sheetReads, 0));
+  t('첫 조회는 시트를 읽는다', () => assert.equal(first > 0, true));
+
+  // 고친 직후에는 반드시 새 값이 보여야 한다(캐시가 옛 값을 물고 있으면 안 된다)
+  post(B, msg('추가 누드티비 new-one.com'));
+  t('추가하면 즉시 새 목록이 보인다', () => {
+    post(B, cbqLast(env, 'list'));
+    assert.equal(/new-one\.com/.test(lastText(env)), true);
+  });
+  t('모델에도 실제로 들어가 있다', () => assert.equal(B.loadModel_()[0].domains.indexOf('new-one.com') !== -1, true));
+}
+{
+  // 되돌리기는 시트를 직접 되돌린다 — 캐시가 옛 값을 물고 있으면 '되돌렸는데 그대로'가 된다
+  const { env, B } = fresh(SEED);
+  post(B, msg('삭제 egg-5.com'));
+  B.loadModel_();                       // 캐시를 일부러 채운다
+  post(B, msg('되돌리기'));
+  post(B, cbqLast(env, 'undook'));
+  t('되돌린 뒤 캐시가 아니라 실제 시트가 보인다', () => assert.deepEqual(B.loadModel_(), SEED));
+}
+{
+  // 보내기와 옛 버튼 떼기를 '한 번에' 보내도 둘 다 실제로 나가야 한다
+  const { env, B } = fresh(SEED);
+  post(B, cbq('list', '-1001', 4321));
+  t('한 번에 보내도 새 메시지가 나간다', () => assert.equal(env.sent.some((x) => x.method === 'sendMessage' && /등록된 도메인/.test(x.body.text)), true));
+  t('한 번에 보내도 옛 버튼은 떼어진다', () => {
+    const strip = env.sent.find((x) => x.method === 'editMessageReplyMarkup');
+    assert.equal(!!strip, true);
+    assert.equal(strip.body.message_id, 4321);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
 // 11-4. 패널을 쉽게 부르기
 // ═══════════════════════════════════════════════════════════
 {
@@ -1361,6 +1409,20 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('대기조가 고유번호를 붙여 보낸다', () => assert.equal(/relayId: RELAY_ID/.test(RELAY_JS), true));
   t('대기조가 첫 인사를 여러 번 시도한다', () => assert.equal(/attempt <= 3/.test(RELAY_JS), true));
   t('브리지가 고유번호로 주인을 가린다', () => assert.equal(/function relayOwner_/.test(GS2), true));
+  // ★ 반응 속도 — 설정값을 요청마다 통째로 한 번만 읽는다(2026-09-05)
+  t('새 요청마다 설정값 기억을 비운다', () => {
+    for (const fn of ['function doPost', 'function doGet', 'function pollUpdates', 'function hourlyTick', 'function watchdog']) {
+      const at = GS2.indexOf(fn);
+      assert.notEqual(at, -1, fn + ' 없음');
+      assert.equal(/PROP_MEMO = null/.test(GS2.slice(at, at + 400)), true, fn + ' 에 기억 비우기 없음');
+    }
+  });
+  t('고치면 목록 캐시를 반드시 버린다', () => {
+    for (const fn of ['function saveModel_', 'function undo_']) {
+      const at = GS2.indexOf(fn);
+      assert.equal(/invalidateModel_\(\)/.test(GS2.slice(at, at + 400)), true, fn + ' 에 캐시 버리기 없음');
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════
