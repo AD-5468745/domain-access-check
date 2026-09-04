@@ -218,8 +218,18 @@ function post(B, update, params) {
 }
 const msg = (text, chat = '-1001') => ({ channel_post: { chat: { id: chat }, message_id: 1, text, author_signature: '김담당' } });
 const cbq = (data, chat = '-1001') => ({ callback_query: { id: 'c1', data, from: { id: 7, first_name: '박담당' }, message: { chat: { id: chat }, message_id: 9 } } });
+// ★ 깃허브로 나간 요청 중 '점검'만 센다 — 대기조 깨우기가 섞이면 숫자가 어긋난다.
+const checkRuns = (env) => env.github.filter((g) => /check\.yml/.test(g.url));
+const relayRuns = (env) => env.github.filter((g) => /relay\.yml/.test(g.url));
+// ★ 버튼 응답이 '새 메시지 + 옛 버튼 떼기' 두 번 호출이 되었으므로,
+//   "마지막으로 나간 것"이 곧 "마지막 화면"이 아니다. 실제 메시지만 골라낸다.
+const lastSent = (env) => {
+  for (let i = env.sent.length - 1; i >= 0; i--) if (env.sent[i].method === 'sendMessage') return env.sent[i];
+  return null;
+};
 const lastText = (env) => {
   for (let i = env.sent.length - 1; i >= 0; i--) {
+    // 2026-09-04부터 버튼 응답도 '새 메시지'다(editMessageText 는 더 쓰지 않는다).
     if (env.sent[i].method === 'sendMessage' || env.sent[i].method === 'editMessageText') return env.sent[i].body.text;
   }
   return '';
@@ -391,7 +401,7 @@ const lastText = (env) => {
   const { env, B } = fresh(SEED);
   post(B, cbq('add'));
   t('업체 선택 버튼 제공', () => {
-    const kb = env.sent[env.sent.length - 1].body.reply_markup.inline_keyboard;
+    const kb = lastSent(env).body.reply_markup.inline_keyboard;
     assert.equal(JSON.stringify(kb).indexOf('누드티비') !== -1, true);
   });
   post(B, cbq('a:0'));
@@ -451,8 +461,8 @@ const lastText = (env) => {
 {
   const { env, B } = fresh(SEED);
   post(B, msg('점검'));
-  t('점검 명령이 GitHub을 깨움', () => assert.equal(env.github.length, 1));
-  t('수동 실행 표시', () => assert.equal(env.github[0].body.inputs.mode, 'manual'));
+  t('점검 명령이 GitHub을 깨움', () => assert.equal(checkRuns(env).length, 1));
+  t('수동 실행 표시', () => assert.equal(checkRuns(env)[0].body.inputs.mode, 'manual'));
   t('감시 트리거 설치됨', () => assert.equal(env.triggers.some((x) => x.getHandlerFunction() === 'watchdog'), true));
 
   env.sent.length = 0;
@@ -465,23 +475,23 @@ const lastText = (env) => {
   env.propStore.set('CHECK_HOURS', '9,21');
   env.setNow('2026-08-28T09:05:00+09:00');
   B.hourlyTick();
-  t('정해진 시각이면 자동 점검', () => assert.equal(env.github.length, 1));
-  t('자동 실행 표시', () => assert.equal(env.github[0].body.inputs.mode, 'auto'));
+  t('정해진 시각이면 자동 점검', () => assert.equal(checkRuns(env).length, 1));
+  t('자동 실행 표시', () => assert.equal(checkRuns(env)[0].body.inputs.mode, 'auto'));
   B.hourlyTick();
-  t('같은 시각 중복 실행 안 함', () => assert.equal(env.github.length, 1));
+  t('같은 시각 중복 실행 안 함', () => assert.equal(checkRuns(env).length, 1));
 
   env.setNow('2026-08-28T14:05:00+09:00');
   B.hourlyTick();
-  t('설정 시각이 아니면 실행 안 함', () => assert.equal(env.github.length, 1));
+  t('설정 시각이 아니면 실행 안 함', () => assert.equal(checkRuns(env).length, 1));
 
   env.setNow('2026-08-28T21:05:00+09:00');
   B.hourlyTick();
-  t('두 번째 시각에 실행', () => assert.equal(env.github.length, 2));
+  t('두 번째 시각에 실행', () => assert.equal(checkRuns(env).length, 2));
 
   env.propStore.set('PAUSED', 'yes');
   env.setNow('2026-08-29T09:05:00+09:00');
   B.hourlyTick();
-  t('일시중지 중엔 자동 실행 안 함', () => assert.equal(env.github.length, 2));
+  t('일시중지 중엔 자동 실행 안 함', () => assert.equal(checkRuns(env).length, 2));
 }
 {
   const { env, B } = fresh(SEED);
@@ -651,7 +661,7 @@ const lastText = (env) => {
   post(B, cbq('d:0'));
   t('주소 40개 초과 시 안내 표시', () => assert.equal(/앞 40개만/.test(lastText(env)), true));
   t('버튼은 41개 이하(40 + 메뉴로)', () => {
-    const kb = env.sent[env.sent.length - 1].body.reply_markup.inline_keyboard;
+    const kb = lastSent(env).body.reply_markup.inline_keyboard;
     assert.equal(kb.length <= 41, true);
   });
 }
@@ -664,7 +674,7 @@ const lastText = (env) => {
   post(B, msg('메뉴'));
   t('메뉴에 현황 표시', () => assert.equal(/업체 2곳 · 도메인 3개/.test(lastText(env)), true));
   t('메뉴에 버튼 8개', () => {
-    const kb = env.sent[env.sent.length - 1].body.reply_markup.inline_keyboard;
+    const kb = lastSent(env).body.reply_markup.inline_keyboard;
     assert.equal(kb.reduce((n, r) => n + r.length, 0), 8);
   });
   post(B, msg('목록'));
@@ -740,6 +750,124 @@ const lastText = (env) => {
   };
   B.pollUpdates();
   t('폴링이 막히면 웹훅을 떼어냄', () => assert.equal(env.sent.some((s) => s.method === 'deleteWebhook'), true));
+}
+
+// ═══════════════════════════════════════════════════════════
+// 11-3. 버튼 응답이 '새 메시지'로 온다 (2026-09-04 에이든 지시)
+//   왜: 제자리에서 고쳐 쓰면, 그 메시지가 화면 위로 밀렸을 때 아래에는
+//       아무 변화가 없어 "눌러도 반응이 없다"로 보인다.
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  post(B, cbq('list'));
+  t('버튼 응답이 새 메시지로 온다', () => {
+    assert.equal(env.sent.some((x) => x.method === 'sendMessage' && /등록된 도메인/.test(x.body.text)), true);
+  });
+  t('버튼 응답에 제자리 수정(editMessageText)을 쓰지 않는다', () => {
+    assert.equal(env.sent.some((x) => x.method === 'editMessageText'), false);
+  });
+  t('누른 옛 메시지의 버튼은 떼어낸다', () => {
+    const strip = env.sent.find((x) => x.method === 'editMessageReplyMarkup');
+    assert.equal(!!strip, true);
+    assert.equal(strip.body.message_id, 9);
+    assert.deepEqual(strip.body.reply_markup.inline_keyboard, []);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// 11-4. 패널을 쉽게 부르기
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('ㅁ'));
+  t("'ㅁ' 한 글자로 패널이 나온다", () => assert.equal(/접속점검 관리/.test(lastText(env)), true));
+  post(B, msg('패널'));
+  t("'패널' 로도 나온다", () => assert.equal(/접속점검 관리/.test(lastText(env)), true));
+  post(B, msg('/menu'));
+  t("'/menu' 로도 나온다", () => assert.equal(/접속점검 관리/.test(lastText(env)), true));
+  t('패널에 다시 부르는 법이 적혀 있다', () => assert.equal(/ㅁ/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh(SEED);
+  B.setupAll();
+  t('설치가 / 명령 메뉴를 등록', () => {
+    const c = env.sent.find((x) => x.method === 'setMyCommands');
+    assert.equal(!!c, true);
+    assert.deepEqual(c.body.commands.map((x) => x.command), ['menu', 'check', 'list', 'help']);
+  });
+  t('설치가 안내문을 채널에 고정', () => assert.equal(env.sent.some((x) => x.method === 'pinChatMessage'), true));
+}
+
+// ═══════════════════════════════════════════════════════════
+// 11-5. 깨우기형 대기조 — 첫 조작에만 깨우고, 살아 있는 동안은 폴링이 물러난다
+// ═══════════════════════════════════════════════════════════
+const relayApi = (B, action, body) => JSON.parse(B.doPost({
+  parameter: {},
+  postData: { contents: JSON.stringify(Object.assign({ token: 'tok', action }, body || {})) },
+}).text);
+
+{
+  const { env, B } = fresh(SEED);
+  post(B, msg('목록'));
+  t('첫 조작이 대기조를 깨움', () => assert.equal(relayRuns(env).length, 1));
+  t('대기조에 조용해지면 끌 시간을 넘김', () => assert.equal(relayRuns(env)[0].body.inputs.minutes, '10'));
+
+  post(B, msg('상태'));
+  t('연달아 온 조작은 다시 깨우지 않음(1분 쿨다운)', () => assert.equal(relayRuns(env).length, 1));
+}
+{
+  // 허용되지 않은 채널의 글로는 깃허브를 깨울 수 없어야 한다(외부인이 실행을 유발하는 사고 방지)
+  const { env, B } = fresh(SEED);
+  post(B, msg('목록', '-999'));
+  t('허용 안 된 채널은 대기조를 못 깨움', () => assert.equal(relayRuns(env).length, 0));
+}
+{
+  const { env, B } = fresh(SEED);
+  const hello = relayApi(B, 'relay-hello', {});
+  t('대기조 시작 시 이어받을 지점을 알려줌', () => {
+    assert.equal(hello.ok, true);
+    assert.equal(hello.offset, 0);
+    assert.equal(hello.idleMinutes, 10);
+  });
+  t('두 번째 대기조는 스스로 물러남', () => assert.equal(relayApi(B, 'relay-hello', {}).alreadyAlive, true));
+
+  // 대기조가 살아 있으면 앱스스크립트 폴링은 텔레그램을 건드리지 않는다
+  let polled = 0;
+  env.tgReply = (method) => {
+    if (method === 'getUpdates') { polled += 1; return { ok: true, result: [] }; }
+    return { ok: true, result: {} };
+  };
+  B.pollUpdates();
+  t('대기조가 살아 있으면 1분 폴링이 물러남', () => assert.equal(polled, 0));
+
+  // 대기조가 명령을 넘기면 그대로 처리되고, 처리 지점이 기록된다
+  const r = relayApi(B, 'relay-update', {
+    update: { update_id: 501, channel_post: { chat: { id: -1001 }, message_id: 3, text: '목록' } },
+    offset: 502,
+  });
+  t('대기조가 넘긴 명령을 처리', () => assert.equal(r.result, 'ok'));
+  t('대기조가 넘긴 명령이 실제로 답을 보냄', () => assert.equal(/등록된 도메인/.test(lastText(env)), true));
+  t('처리 지점이 기록됨', () => assert.equal(env.props.get('TG_OFFSET'), '502'));
+
+  // 대기조가 꺼지면 즉시 1분 방식으로 복귀한다
+  relayApi(B, 'relay-bye', { offset: 502 });
+  B.pollUpdates();
+  t('대기조 종료 후 1분 폴링이 복귀', () => assert.equal(polled, 1));
+}
+{
+  // 하트비트가 끊기면(대기조가 죽으면) 90초 뒤 자동으로 1분 방식이 돌아온다
+  const { env, B } = fresh(SEED);
+  relayApi(B, 'relay-hello', {});
+  let polled = 0;
+  env.tgReply = (method) => {
+    if (method === 'getUpdates') { polled += 1; return { ok: true, result: [] }; }
+    return { ok: true, result: {} };
+  };
+  B.pollUpdates();
+  t('하트비트가 살아 있는 동안은 물러남', () => assert.equal(polled, 0));
+  env.setNow('2026-08-28T12:02:00+09:00');     // 2분 뒤 = 하트비트 만료
+  B.pollUpdates();
+  t('하트비트가 끊기면 자동 복귀', () => assert.equal(polled, 1));
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -916,15 +1044,15 @@ const lastText = (env) => {
   env.propStore.set('CHECK_HOURS', '9,21');
   env.setNow('2026-08-28T08:56:00+09:00');
   B.hourlyTick();
-  t('08:56 에는 실행 안 함', () => assert.equal(env.github.length, 0));
+  t('08:56 에는 실행 안 함', () => assert.equal(checkRuns(env).length, 0));
   env.setNow('2026-08-28T10:02:00+09:00');
   B.hourlyTick();
-  t('10:02 에 09시 회차를 보정 실행', () => assert.equal(env.github.length, 1));
+  t('10:02 에 09시 회차를 보정 실행', () => assert.equal(checkRuns(env).length, 1));
   B.hourlyTick();
-  t('보정 실행은 한 번만', () => assert.equal(env.github.length, 1));
+  t('보정 실행은 한 번만', () => assert.equal(checkRuns(env).length, 1));
   env.setNow('2026-08-28T13:00:00+09:00');
   B.hourlyTick();
-  t('3시간 넘게 지난 회차는 다시 안 함', () => assert.equal(env.github.length, 1));
+  t('3시간 넘게 지난 회차는 다시 안 함', () => assert.equal(checkRuns(env).length, 1));
 }
 
 // (10) 리포트가 아주 길어도 결과 탭 기록이 멈추지 않아야 한다
@@ -1077,7 +1205,7 @@ const lastText = (env) => {
   // (b) 설명서에 적힌 버튼 글자가 실제 버튼과 같은가
   const { env: e2, B: B2 } = fresh(SEED);
   post(B2, msg('메뉴'));
-  const mainLabels = JSON.stringify(e2.sent[e2.sent.length - 1].body.reply_markup);
+  const mainLabels = JSON.stringify(lastSent(e2).body.reply_markup);
   for (const label of ['🔍 지금 점검', '📋 목록 보기', '➕ 도메인 추가', '🗑 도메인 삭제',
     '🏢 업체 관리', '⚙️ 설정', '↩️ 되돌리기', '❓ 도움말']) {
     t(`문서 버튼 존재: ${label}`, () => {
@@ -1086,7 +1214,7 @@ const lastText = (env) => {
     });
   }
   post(B2, cbq('cfg'));
-  const cfgLabels = JSON.stringify(e2.sent[e2.sent.length - 1].body.reply_markup);
+  const cfgLabels = JSON.stringify(lastSent(e2).body.reply_markup);
   for (const label of ['🕘 점검 시각 바꾸기', '자동 점검 일시중지']) {
     t(`설정 버튼 글자 일치: ${label}`, () => {
       assert.equal(cfgLabels.indexOf(label) !== -1, true, '버튼에 없음');
@@ -1133,9 +1261,54 @@ const lastText = (env) => {
     assert.deepEqual(missing, []);
   });
   t('SETUP 이 안내한 실행 함수가 코드에 존재', () => {
-    const fns = ['setupAll', 'pollUpdates', 'getWebhookInfo', 'deleteWebhook', 'testRead', 'testChannel', 'applySchedule_'];
+    const fns = ['setupAll', 'pollUpdates', 'getWebhookInfo', 'deleteWebhook', 'testRead', 'testChannel', 'applySchedule_', 'setupCommands', 'pinGuide'];
     const missing = fns.filter((f) => !new RegExp(`function\\s+${f}\\s*\\(`).test(GSRC) || SETUP.indexOf(f) === -1);
     assert.deepEqual(missing, []);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// 15. 대기조 — 설정과 코드가 어긋나면 '조용히 안 도는' 사고가 난다
+// ═══════════════════════════════════════════════════════════
+{
+  const RELAY_JS = fs.readFileSync(new URL('../relay.js', import.meta.url), 'utf8');
+  const RELAY_YML = fs.readFileSync(new URL('../.github/workflows/relay.yml', import.meta.url), 'utf8');
+  const CHECK_YML = fs.readFileSync(new URL('../.github/workflows/check.yml', import.meta.url), 'utf8');
+  const GS2 = fs.readFileSync(new URL('../apps-script/bridge.gs', import.meta.url), 'utf8');
+
+  t('앱스스크립트가 깨우는 파일명이 실제 파일과 같다', () => {
+    assert.equal(/RELAY_FILE', 'relay\.yml'/.test(GS2), true);
+  });
+  t('대기조 워크플로가 relay.js 를 실행', () => assert.equal(/node relay\.js/.test(RELAY_YML), true));
+  t('대기조에 필요한 값 3개를 모두 넘김', () => {
+    for (const k of ['BRIDGE_URL', 'BRIDGE_TOKEN', 'BOT_TOKEN']) {
+      assert.equal(new RegExp(`\\n\\s+${k}:`).test(RELAY_YML), true, `${k} 없음`);
+    }
+  });
+  // ★ 같은 concurrency 그룹을 쓰면 대기조가 도는 동안 '지금 점검'이 줄서서 멈춘다.
+  t('대기조와 점검이 서로를 막지 않음(그룹 분리)', () => {
+    const g = (y) => (y.match(/group:\s*(\S+)/) || [])[1];
+    assert.notEqual(g(RELAY_YML), undefined);
+    assert.notEqual(g(RELAY_YML), g(CHECK_YML));
+  });
+  // ★ relay.js 가 스스로 끝나는 시간보다 워크플로 제한이 짧으면 매번 '실패'로 끝난다.
+  t('워크플로 제한이 자체 종료 시간보다 길다', () => {
+    const limit = Number((RELAY_YML.match(/timeout-minutes:\s*(\d+)/) || [])[1]);
+    const self = Number((RELAY_JS.match(/HARD_STOP_MS\s*=\s*(\d+)/) || [])[1]);
+    assert.equal(limit > self, true, `${limit}분 <= ${self}분`);
+  });
+  // ★ 저장소가 공개다 — 실행 기록에 메시지 내용·주소·chat_id 가 남으면 안 된다.
+  t('대기조 로그에 메시지 내용을 찍지 않음', () => {
+    const logs = RELAY_JS.match(/console\.log\(([^;]*)\)/g) || [];
+    const leaky = logs.filter((l) => /\bu\b|\.text|chat|update\.|JSON\.stringify|list\[/.test(l));
+    assert.deepEqual(leaky, []);
+  });
+  t('대기조가 토큰을 로그에 남기지 않게 가림', () => {
+    assert.equal(/BOT_TOKEN\)\.join\('\*\*\*'\)/.test(RELAY_JS), true);
+    assert.equal(/BRIDGE_TOKEN\)\.join\('\*\*\*'\)/.test(RELAY_JS), true);
+  });
+  t('대기조는 브리지를 POST 로 부른다(한국 경유 GET 404 사고 재발 방지)', () => {
+    assert.equal(/method: 'POST'/.test(RELAY_JS), true);
   });
 }
 

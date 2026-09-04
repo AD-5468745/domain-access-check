@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+/**
+ * 대기조 (relay) — 버튼 반응을 0~59초에서 1~3초로 줄이는 '빠른 응답조'.
+ * ═══════════════════════════════════════════════════════════════════
+ *
+ * 왜 필요한가
+ *   구글 앱스스크립트는 트리거 최소 간격이 1분이라, 혼자서는 절대 1분보다 빨라질 수 없다.
+ *   텔레그램 웹훅은 앱스스크립트가 302(넘김)를 돌려주기 때문에 못 쓴다(2026-09-04 실측).
+ *   그래서 담당자가 '첫 조작'을 하면 앱스스크립트가 이 워크플로를 깨우고,
+ *   이 대기조가 살아 있는 동안 명령을 초 단위로 받아 넘긴다.
+ *
+ * 언제 끝나나
+ *   채널이 IDLE_MINUTES(기본 10분)간 조용하면 스스로 종료 → 다시 1분 방식으로 돌아간다.
+ *   24시간 켜두지 않는다(실제로 쓰는 시간에만 돈다).
+ *
+ * 죽어도 되는 장치
+ *   대기조가 죽으면 하트비트가 끊기고, 90초 안에 앱스스크립트 1분 폴링이 자동 복귀한다.
+ *   즉 이 파일은 '속도'만 담당하고, 기능은 하나도 담당하지 않는다.
+ *
+ * 보안 (저장소가 공개이므로 특히 중요)
+ *   로그에 메시지 내용·도메인·업체명·chat_id·토큰을 절대 찍지 않는다. 건수만 남긴다.
+ */
+
+const BRIDGE_URL = process.env.BRIDGE_URL || '';
+const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
+const BOT_TOKEN = process.env.BOT_TOKEN || '';
+
+const IDLE_MS = Math.max(1, Number(process.env.IDLE_MINUTES || 10)) * 60 * 1000;
+const HARD_STOP_MS = 16 * 60 * 1000;   // 워크플로 제한(20분)보다 넉넉히 먼저 스스로 끝낸다
+const LONG_POLL_S = 25;                // 텔레그램에 '새 명령 생길 때까지' 귀 대고 있는 시간
+const ALLOWED = ['message', 'channel_post', 'callback_query'];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 어떤 오류 메시지에도 비밀값이 섞이지 않게 한다 */
+function safeMsg(e) {
+  let m = String((e && e.message) || e || '알 수 없는 오류');
+  if (BOT_TOKEN) m = m.split(BOT_TOKEN).join('***');
+  if (BRIDGE_TOKEN) m = m.split(BRIDGE_TOKEN).join('***');
+  return m.replace(/https?:\/\/\S+/g, '(주소생략)').slice(0, 200);
+}
+
+async function fetchJson(url, opts, timeoutMs) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, Object.assign({ signal: ac.signal, redirect: 'follow' }, opts || {}));
+    const text = await res.text();
+    try { return JSON.parse(text); } catch (e) { throw new Error('응답이 JSON 이 아님 (HTTP ' + res.status + ')'); }
+  } finally { clearTimeout(timer); }
+}
+
+/** 구글 앱스스크립트 브리지 호출 — 반드시 POST(한국 경유 GET 이 막히는 사례가 있었다) */
+function bridge(action, payload) {
+  return fetchJson(BRIDGE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action }, payload || {})),
+  }, 30000);
+}
+
+/** 텔레그램에 길게 귀 대고 있기. 회복 불가능한 상황이면 null 을 돌려준다. */
+async function getUpdates(offset) {
+  const url = 'https://api.telegram.org/bot' + BOT_TOKEN + '/getUpdates'
+    + '?timeout=' + LONG_POLL_S + '&limit=30'
+    + '&allowed_updates=' + encodeURIComponent(JSON.stringify(ALLOWED))
+    + (offset ? '&offset=' + offset : '');
+  const body = await fetchJson(url, {}, (LONG_POLL_S + 10) * 1000);
+  if (body && body.ok) return body.result || [];
+  const desc = String((body && body.description) || '알 수 없음');
+  if (/webhook is active/i.test(desc)) {
+    console.log('텔레그램 웹훅이 걸려 있어 대기조를 쓸 수 없습니다 — 종료합니다.');
+    return null;
+  }
+  throw new Error('텔레그램 수신 실패: ' + desc.slice(0, 120));
+}
+
+async function main() {
+  if (!BRIDGE_URL || !BRIDGE_TOKEN || !BOT_TOKEN) {
+    console.log('필요한 값이 없습니다 (BRIDGE_URL / BRIDGE_TOKEN / BOT_TOKEN) — 종료합니다.');
+    return;
+  }
+
+  let hello;
+  try { hello = await bridge('relay-hello', {}); }
+  catch (e) { console.log('브리지에 연결하지 못했습니다: ' + safeMsg(e)); return; }
+
+  if (!hello || !hello.ok) { console.log('브리지가 시작을 거절했습니다 — 종료합니다.'); return; }
+  if (hello.alreadyAlive) { console.log('이미 다른 대기조가 돌고 있습니다 — 종료합니다.'); return; }
+
+  let offset = Number(hello.offset || 0) || 0;
+  let lastActivity = Date.now();
+  const started = Date.now();
+  let forwarded = 0, failures = 0;
+
+  console.log('대기조 시작 — 조용하면 ' + Math.round(IDLE_MS / 60000) + '분 뒤 자동 종료');
+
+  while (true) {
+    if (Date.now() - lastActivity > IDLE_MS) { console.log('채널이 조용해졌습니다 — 정상 종료'); break; }
+    if (Date.now() - started > HARD_STOP_MS) { console.log('최대 가동시간 도달 — 정상 종료'); break; }
+
+    let list;
+    try { list = await getUpdates(offset); }
+    catch (e) {
+      failures++;
+      console.log('수신 오류(' + failures + '회) — 3초 뒤 다시 시도: ' + safeMsg(e));
+      if (failures >= 5) { console.log('연속 실패 — 1분 방식에 넘기고 종료합니다.'); break; }
+      await sleep(3000);
+      continue;
+    }
+    if (list === null) break;
+    failures = 0;
+
+    if (!list.length) {
+      try { await bridge('relay-ping', { offset }); }
+      catch (e) { console.log('하트비트 실패 — 1분 방식에 넘기고 종료합니다: ' + safeMsg(e)); break; }
+      continue;
+    }
+
+    let broke = false;
+    for (const u of list) {
+      let ok = false;
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        try {
+          const r = await bridge('relay-update', { update: u, offset: u.update_id + 1 });
+          ok = !!(r && r.ok);
+        } catch (e) { ok = false; }
+        if (!ok) await sleep(1000);
+      }
+      if (!ok) {
+        // ★ 여기서 offset 을 올리면 그 명령은 영영 사라진다.
+        //   올리지 않고 물러나면 1분 방식이 같은 자리에서 다시 가져간다.
+        console.log('브리지 전달 실패 — 명령을 남겨두고 1분 방식에 넘깁니다.');
+        broke = true;
+        break;
+      }
+      offset = u.update_id + 1;
+      forwarded++;
+    }
+    console.log('명령 ' + list.length + '건 처리');
+    lastActivity = Date.now();
+    if (broke) break;
+  }
+
+  try { await bridge('relay-bye', { offset }); }
+  catch (e) { console.log('종료 신고 실패(90초 뒤 자동 복귀됩니다): ' + safeMsg(e)); }
+  console.log('대기조 종료 — 총 ' + forwarded + '건 전달');
+}
+
+main().catch((e) => { console.log('대기조 오류: ' + safeMsg(e)); process.exit(0); });

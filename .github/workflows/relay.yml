@@ -1,0 +1,54 @@
+name: 명령 즉시 응답 (대기조)
+
+# 평소엔 꺼져 있다.
+#   담당자가 채널에서 첫 조작을 하면 앱스스크립트(bridge.gs → wakeRelay_)가 이 워크플로를 깨운다.
+#   살아 있는 동안 텔레그램 명령을 초 단위로 받아 넘기고, 10분간 조용하면 스스로 끝난다.
+#
+# 왜 정기 실행(cron)이 아닌가
+#   · 24시간 켜둘 이유가 없다 — 담당자가 실제로 조작하는 시간에만 필요하다.
+#   · 저장소가 공개라 실행 시간은 무료지만, 놀리는 실행은 만들지 않는다.
+#
+# 이 워크플로가 죽어도 기능은 멀쩡하다
+#   하트비트가 끊기면 90초 안에 앱스스크립트 1분 폴링이 자동으로 되돌아온다.
+#
+# 로그 주의: 저장소가 공개다. relay.js 는 건수만 찍고 메시지 내용·주소·chat_id 를 남기지 않는다.
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: '채널이 조용하면 끄기까지 기다리는 시간(분)'
+        required: false
+        default: '10'
+
+permissions:
+  contents: read
+
+# 두 대기조가 동시에 텔레그램 명령을 가져가면 순서가 꼬인다 → 한 번에 하나만.
+concurrency:
+  group: domain-access-check-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    name: 대기조
+    runs-on: ubuntu-latest
+    timeout-minutes: 20      # relay.js 는 16분에 스스로 끝난다(여유 4분)
+
+    steps:
+      - name: 코드 받기
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Node 20 준비
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 대기조 실행
+        env:
+          BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          BRIDGE_TOKEN: ${{ secrets.SHEET_BRIDGE_TOKEN }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          IDLE_MINUTES: ${{ inputs.minutes }}
+        run: node relay.js

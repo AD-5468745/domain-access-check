@@ -48,6 +48,12 @@ var STATE_TTL = 300;         // 대화 상태 유지 시간(초)
 var TG_LIMIT = 3500;         // 텔레그램 메시지 분할 기준(한도 4096보다 여유 있게)
 var WATCHDOG_MIN = 25;       // 점검 요청 후 이 시간 안에 결과가 없으면 경고
 
+// ★ 깨우기형 대기조(relay) — 담당자가 조작을 시작한 순간에만 깃허브에서 '빠른 응답조'를 띄운다.
+//   평소엔 꺼져 있다(24시간 놀리지 않는다). 살아 있는 동안 버튼 반응이 0~59초 → 1~3초.
+var RELAY_IDLE_MIN = 10;         // 채널이 이만큼 조용하면 대기조가 스스로 꺼진다(분)
+var RELAY_ALIVE_MS = 90000;      // 하트비트가 이 시간 안에 없으면 죽은 것으로 보고 1분 방식으로 복귀
+var RELAY_WAKE_COOLDOWN_MS = 60000;  // 연달아 깨우지 않기 위한 최소 간격
+
 var COL_LETTERS = 'ABCDEFGHIJKLMNO';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -476,13 +482,31 @@ function tgSend_(chatId, text, keyboard) {
   return last;
 }
 
-function tgEdit_(chatId, messageId, text, keyboard) {
-  if (text.length > TG_LIMIT) return tgSend_(chatId, text, keyboard);
-  return tgApi_('editMessageText', {
-    chat_id: chatId, message_id: messageId, text: text,
-    parse_mode: 'HTML', disable_web_page_preview: true,
-    reply_markup: keyboard || { inline_keyboard: [] },
-  });
+/**
+ * 버튼을 눌렀을 때의 답.
+ * ★ 예전엔 누른 메시지를 '제자리에서 고쳐' 썼다. 그러면 그 메시지가 화면 위로 밀려 있을 때
+ *   화면 아래에는 아무 변화가 없어 "눌러도 반응이 없다"로 보였다(2026-09-04 에이든 실측).
+ *   이제는 항상 화면 맨 아래에 새 메시지로 답하고, 눌린 옛 메시지의 버튼만 떼어낸다
+ *   — 옛 버튼을 다시 눌러 같은 화면이 계속 쌓이는 것을 막는다.
+ */
+function tgReply_(chatId, messageId, text, keyboard) {
+  var sent = tgSend_(chatId, text, keyboard);
+  tgStripButtons_(chatId, messageId);
+  return sent;
+}
+
+/** 옛 메시지의 버튼만 떼어낸다. 실패해도 조용히 넘어간다(마지막 오류를 더럽히지 않는다). */
+function tgStripButtons_(chatId, messageId) {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot || !messageId || !chatId) return;
+  try {
+    UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/editMessageReplyMarkup', {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }),
+      muteHttpExceptions: true,
+    });
+  } catch (ignore) {}
 }
 
 function tgAnswer_(cbId, text) {
@@ -607,6 +631,8 @@ function menuText_() {
       (s.paused ? '  ⏸ 일시중지' : '') ,
     '마지막 점검 ' + esc_(prop_('LAST_RESULT_AT', '-')),
     esc_(prop_('LAST_RESULT_SUMMARY', '아직 점검 기록이 없습니다')) + '</blockquote>',
+    '',
+    '<blockquote>이 패널이 위로 밀리면 <b>ㅁ</b> 이라고 보내면 다시 나옵니다.</blockquote>',
   ];
   return lines.join('\n');
 }
@@ -629,7 +655,8 @@ function helpText_() {
   return [
     '❓ <b>사용법</b>',
     '',
-    '<blockquote>버튼으로 전부 할 수 있습니다. [메뉴] 를 입력하면 버튼이 나옵니다.</blockquote>',
+    '<blockquote>버튼으로 전부 할 수 있습니다.',
+    '패널이 안 보이면 <b>ㅁ</b> 한 글자만 보내세요 (메뉴 · /menu 도 됩니다).</blockquote>',
     '',
     '⌨️ 글로 바로 쓰는 방법',
     '',
@@ -656,10 +683,10 @@ function helpText_() {
 // ═══════════════════════════════════════════════════════════════════
 // 동작 — 점검 실행
 // ═══════════════════════════════════════════════════════════════════
-function dispatchWorkflow_(reason) {
+/** 깃허브 워크플로 하나를 깨운다(점검·대기조 공용). 성공하면 아무 것도 돌려주지 않는다. */
+function ghDispatch_(file, inputs) {
   var repo = prop_('GITHUB_REPO');
   var token = prop_('GITHUB_TOKEN');
-  var file = prop_('WORKFLOW_FILE', 'check.yml');
   var ref = prop_('GIT_REF', 'main');
   if (!repo || !token) throw new Error('GITHUB_REPO / GITHUB_TOKEN 속성이 없습니다');
 
@@ -673,11 +700,49 @@ function dispatchWorkflow_(reason) {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
     },
-    payload: JSON.stringify({ ref: ref, inputs: { mode: reason || 'manual' } }),
+    payload: JSON.stringify({ ref: ref, inputs: inputs || {} }),
     muteHttpExceptions: true,
   });
   var code = res.getResponseCode();
   if (code !== 204) throw new Error('GitHub 응답 ' + code + ' ' + res.getContentText().slice(0, 200));
+}
+
+// ───────────────────────────────────────────────────────────────────
+// 깨우기형 대기조 — 버튼 반응 0~59초를 1~3초로 줄인다
+// ───────────────────────────────────────────────────────────────────
+/**
+ * 왜 이런 구조인가.
+ *  · 앱스스크립트 트리거는 최소 간격이 1분이라, 혼자서는 절대 1분보다 빨라질 수 없다.
+ *  · 텔레그램 웹훅은 앱스스크립트가 302를 돌려주기 때문에 못 쓴다(2026-09-04 실측).
+ *  → 그래서 담당자가 '첫 조작'을 한 순간에만 깃허브에서 대기조를 깨워, 그 뒤 연속 조작을
+ *    초 단위로 처리한다. 조용해지면 대기조가 스스로 꺼지고 다시 1분 방식으로 돌아온다.
+ *  · 대기조는 어디까지나 '빠르게 하는 장치'다. 죽어도 1분 방식이 그대로 다 처리한다.
+ */
+function relayAlive_() {
+  return (Number(prop_('RELAY_ALIVE_UNTIL', '0')) || 0) > Date.now();
+}
+
+function relayTouch_() { setProp_('RELAY_ALIVE_UNTIL', String(Date.now() + RELAY_ALIVE_MS)); }
+
+function relayStop_() { setProp_('RELAY_ALIVE_UNTIL', '0'); }
+
+function wakeRelay_() {
+  try {
+    if (prop_('RELAY_ENABLED', 'yes') === 'no') return;   // 끄고 싶으면 이 속성만 no 로
+    if (relayAlive_()) return;                            // 이미 깨어 있다
+    var last = Number(prop_('RELAY_WAKE_AT', '0')) || 0;
+    if (Date.now() - last < RELAY_WAKE_COOLDOWN_MS) return;  // 방금 깨웠다 — 겹쳐 띄우지 않는다
+    setProp_('RELAY_WAKE_AT', String(Date.now()));
+    ghDispatch_(prop_('RELAY_FILE', 'relay.yml'), { minutes: String(RELAY_IDLE_MIN) });
+    setProp_('RELAY_LAST_WAKE_KST', nowKst_());
+  } catch (e) {
+    // 실패해도 기능은 살아 있다(1분 방식). 조용히 기록만 남긴다.
+    try { setProp_('RELAY_LAST_ERROR', nowKst_() + ' ' + String(e && e.message || e).slice(0, 140)); } catch (ignore) {}
+  }
+}
+
+function dispatchWorkflow_(reason) {
+  ghDispatch_(prop_('WORKFLOW_FILE', 'check.yml'), { mode: reason || 'manual' });
 
   setProp_('LAST_DISPATCH_AT', nowKst_());
   setProp_('RUN_STATE', '실행중');
@@ -925,7 +990,8 @@ function handleTextCommand_(chatId, text, actor) {
     return tgSend_(chatId, '취소했습니다.', kbMain_());
   }
 
-  if (/^(메뉴|menu|\/menu|시작|\/start)$/i.test(t)) return tgSend_(chatId, menuText_(), kbMain_());
+  // ★ 패널은 최대한 쉽게 불러야 한다 — 한 글자 'ㅁ' 으로도 뜬다(에이든 지시 2026-09-04)
+  if (/^(ㅁ|메뉴|패널|menu|\/menu|\/panel|시작|\/start)$/i.test(t)) return tgSend_(chatId, menuText_(), kbMain_());
   if (/^(도움말|help|\/help|사용법)$/i.test(t)) return tgSend_(chatId, helpText_(), kbBack_());
   if (/^(목록|list|\/list)$/i.test(t)) return tgSend_(chatId, listText_(), kbBack_());
   if (/^(설정|config)$/i.test(t)) return tgSend_(chatId, settingsText_(), kbSettings_());
@@ -1158,21 +1224,21 @@ function handleCallback_(cb) {
   // 다른 담당자가 절차를 진행 중이면 새 절차 시작을 막는다(입력이 섞이는 사고 방지)
   if (['add', 'del', 'coa', 'cor', 'cod', 'cfgh', 'dx', 'codp', 'corp'].indexOf(head) !== -1) {
     var busy = busyBy_(chatId, actor);
-    if (busy) return tgEdit_(chatId, mid, busy, kbMain_());
+    if (busy) return tgReply_(chatId, mid, busy, kbMain_());
   }
 
-  if (head === 'm')    return tgEdit_(chatId, mid, menuText_(), kbMain_());
-  if (head === 'x')    { clearState_(chatId); return tgEdit_(chatId, mid, '취소했습니다.', kbMain_()); }
-  if (head === 'help') return tgEdit_(chatId, mid, helpText_(), kbBack_());
-  if (head === 'list') return tgEdit_(chatId, mid, listText_(), kbBack_());
-  if (head === 'cfg')  return tgEdit_(chatId, mid, settingsText_(), kbSettings_());
+  if (head === 'm')    return tgReply_(chatId, mid, menuText_(), kbMain_());
+  if (head === 'x')    { clearState_(chatId); return tgReply_(chatId, mid, '취소했습니다.', kbMain_()); }
+  if (head === 'help') return tgReply_(chatId, mid, helpText_(), kbBack_());
+  if (head === 'list') return tgReply_(chatId, mid, listText_(), kbBack_());
+  if (head === 'cfg')  return tgReply_(chatId, mid, settingsText_(), kbSettings_());
 
   if (head === 'run') {
     try {
       dispatchWorkflow_('manual');
-      return tgEdit_(chatId, mid, '🌐 점검을 시작합니다.\n\n<blockquote>1~3분 뒤 결과를 보내드릴게요.</blockquote>', kbBack_());
+      return tgReply_(chatId, mid, '🌐 점검을 시작합니다.\n\n<blockquote>1~3분 뒤 결과를 보내드릴게요.</blockquote>', kbBack_());
     } catch (e) {
-      return tgEdit_(chatId, mid, '❌ 실행 요청 실패\n\n<blockquote>' + esc_(String(e.message || e)) + '</blockquote>', kbBack_());
+      return tgReply_(chatId, mid, '❌ 실행 요청 실패\n\n<blockquote>' + esc_(String(e.message || e)) + '</blockquote>', kbBack_());
     }
   }
 
@@ -1180,38 +1246,38 @@ function handleCallback_(cb) {
     if (!model.length) {
       // thenAdd: 업체를 만든 뒤 곧바로 주소 입력으로 이어간다(여기서 끊기면 셋업 첫 단계에서 막힌다)
       setState_(chatId, { op: 'co-add', thenAdd: true, by: actor, at: Date.now() });
-      return tgEdit_(chatId, mid, '🏢 등록된 업체가 없습니다. 먼저 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비\n업체를 만들면 바로 주소를 물어봅니다. (취소: 취소)</blockquote>');
+      return tgReply_(chatId, mid, '🏢 등록된 업체가 없습니다. 먼저 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비\n업체를 만들면 바로 주소를 물어봅니다. (취소: 취소)</blockquote>');
     }
-    return tgEdit_(chatId, mid, '➕ 어느 업체에 추가할까요?',
+    return tgReply_(chatId, mid, '➕ 어느 업체에 추가할까요?',
       kbCompanies_(model, 'a', [[{ text: '+ 새 업체', callback_data: 'an' }]]));
   }
   if (head === 'a') {
     var ci = Number(parts[1]);
-    if (!model[ci]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!model[ci]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
     var st0 = getState_(chatId);
     if (st0 && st0.op === 'add-pick-company') {
       clearState_(chatId);
       return doAdd_(chatId, model[ci].name, st0.domains, actor);
     }
     setState_(chatId, { op: 'add-input', company: model[ci].name, by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '➕ 〔' + esc_(model[ci].name) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에.\nhttps·www·뒤 경로는 알아서 정리됩니다. (취소: 취소)</blockquote>');
+    return tgReply_(chatId, mid, '➕ 〔' + esc_(model[ci].name) + '〕 에 추가할 주소를 보내주세요.\n\n<blockquote>여러 개면 줄바꿈으로 한 번에.\nhttps·www·뒤 경로는 알아서 정리됩니다. (취소: 취소)</blockquote>');
   }
   if (head === 'an') {
     var stn = getState_(chatId);
     setState_(chatId, (stn && stn.op === 'add-pick-company')
       ? { op: 'add-pick-newco', domains: stn.domains, by: actor, at: Date.now() }
       : { op: 'add-newco', by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
+    return tgReply_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
   }
 
   if (head === 'del') {
-    if (!model.length) return tgEdit_(chatId, mid, '등록된 도메인이 없습니다.', kbMain_());
-    return tgEdit_(chatId, mid, '🗑 어느 업체의 주소를 지울까요?', kbCompanies_(model, 'd'));
+    if (!model.length) return tgReply_(chatId, mid, '등록된 도메인이 없습니다.', kbMain_());
+    return tgReply_(chatId, mid, '🗑 어느 업체의 주소를 지울까요?', kbCompanies_(model, 'd'));
   }
   if (head === 'd') {
     var di = Number(parts[1]);
-    if (!model[di]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
-    if (!model[di].domains.length) return tgEdit_(chatId, mid, '〔' + esc_(model[di].name) + '〕 에 주소가 없습니다.', kbMain_());
+    if (!model[di]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!model[di].domains.length) return tgReply_(chatId, mid, '〔' + esc_(model[di].name) + '〕 에 주소가 없습니다.', kbMain_());
     var rows = [];
     for (var i = 0; i < model[di].domains.length; i++) {
       rows.push([{ text: '🗑 ' + model[di].domains[i], callback_data: 'dx:' + di + ':' + i }]);
@@ -1220,29 +1286,29 @@ function handleCallback_(cb) {
     rows.push([{ text: '◀️ 메뉴로', callback_data: 'm' }]);
     var over = model[di].domains.length - rows.length + 1;
     var note = over > 0 ? '\n\n<blockquote>주소가 많아 앞 40개만 보여드립니다.\n나머지는 <b>삭제 example.com</b> 처럼 주소를 직접 적어주세요.</blockquote>' : '';
-    return tgEdit_(chatId, mid, '🗑 〔' + esc_(model[di].name) + '〕 에서 지울 주소를 고르세요.' + note, { inline_keyboard: rows });
+    return tgReply_(chatId, mid, '🗑 〔' + esc_(model[di].name) + '〕 에서 지울 주소를 고르세요.' + note, { inline_keyboard: rows });
   }
   if (head === 'dx') {
     var c1 = Number(parts[1]), d1 = Number(parts[2]);
-    if (!model[c1] || !model[c1].domains[d1]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!model[c1] || !model[c1].domains[d1]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
     setState_(chatId, { op: 'del-confirm', company: model[c1].name, domain: model[c1].domains[d1], by: actor, at: Date.now(), mid: mid });
-    return tgEdit_(chatId, mid, '🗑 〔' + esc_(model[c1].name) + '〕 <b>' + esc_(model[c1].domains[d1]) + '</b> 을(를) 삭제할까요?',
+    return tgReply_(chatId, mid, '🗑 〔' + esc_(model[c1].name) + '〕 <b>' + esc_(model[c1].domains[d1]) + '</b> 을(를) 삭제할까요?',
       { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'dok' }, { text: '아니오', callback_data: 'x' }]] });
   }
   if (head === 'dok') {
     var std = getState_(chatId);
     clearState_(chatId);
-    if (!std || std.op !== 'del-confirm') return tgEdit_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!std || std.op !== 'del-confirm') return tgReply_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
     // 오래된 확인 버튼(위로 스크롤해서 누른 것)이 엉뚱한 대상을 지우지 않게 한다
-    if (std.mid && std.mid !== mid) return tgEdit_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
+    if (std.mid && std.mid !== mid) return tgReply_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
     try {
       var rd = opRemoveDomain_(std.domain, std.company, actor);
-      return tgEdit_(chatId, mid, '✅ 삭제됨 — 〔' + esc_(rd.company) + '〕 ' + esc_(rd.domain) + '\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
-    } catch (e) { return tgEdit_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+      return tgReply_(chatId, mid, '✅ 삭제됨 — 〔' + esc_(rd.company) + '〕 ' + esc_(rd.domain) + '\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+    } catch (e) { return tgReply_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
   }
 
   if (head === 'co') {
-    return tgEdit_(chatId, mid, '🏢 <b>업체 관리</b>\n\n<blockquote>' + (model.length ? model.map(function (c) { return esc_(c.name) + ' (' + c.domains.length + ')'; }).join('\n') : '등록된 업체가 없습니다') + '</blockquote>',
+    return tgReply_(chatId, mid, '🏢 <b>업체 관리</b>\n\n<blockquote>' + (model.length ? model.map(function (c) { return esc_(c.name) + ' (' + c.domains.length + ')'; }).join('\n') : '등록된 업체가 없습니다') + '</blockquote>',
       { inline_keyboard: [
         [{ text: '➕ 업체 추가', callback_data: 'coa' }],
         [{ text: '✏️ 이름 바꾸기', callback_data: 'cor' }, { text: '🗑 업체 삭제', callback_data: 'cod' }],
@@ -1251,60 +1317,60 @@ function handleCallback_(cb) {
   }
   if (head === 'coa') {
     setState_(chatId, { op: 'co-add', by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
+    return tgReply_(chatId, mid, '🏢 새 업체 이름을 보내주세요.\n\n<blockquote>예) 누드티비   (취소: 취소)</blockquote>');
   }
   if (head === 'cor') {
-    if (!model.length) return tgEdit_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());
-    return tgEdit_(chatId, mid, '✏️ 이름을 바꿀 업체를 고르세요.', kbCompanies_(model, 'corp'));
+    if (!model.length) return tgReply_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());
+    return tgReply_(chatId, mid, '✏️ 이름을 바꿀 업체를 고르세요.', kbCompanies_(model, 'corp'));
   }
   if (head === 'corp') {
     var ri = Number(parts[1]);
-    if (!model[ri]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!model[ri]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
     setState_(chatId, { op: 'co-rename', name: model[ri].name, by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '✏️ 〔' + esc_(model[ri].name) + '〕 의 새 이름을 보내주세요.\n\n<blockquote>(취소: 취소)</blockquote>');
+    return tgReply_(chatId, mid, '✏️ 〔' + esc_(model[ri].name) + '〕 의 새 이름을 보내주세요.\n\n<blockquote>(취소: 취소)</blockquote>');
   }
   if (head === 'cod') {
-    if (!model.length) return tgEdit_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());
-    return tgEdit_(chatId, mid, '🗑 삭제할 업체를 고르세요.\n\n<blockquote>그 업체의 도메인이 함께 지워집니다.</blockquote>', kbCompanies_(model, 'codp'));
+    if (!model.length) return tgReply_(chatId, mid, '등록된 업체가 없습니다.', kbMain_());
+    return tgReply_(chatId, mid, '🗑 삭제할 업체를 고르세요.\n\n<blockquote>그 업체의 도메인이 함께 지워집니다.</blockquote>', kbCompanies_(model, 'codp'));
   }
   if (head === 'codp') {
     var xi = Number(parts[1]);
-    if (!model[xi]) return tgEdit_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
+    if (!model[xi]) return tgReply_(chatId, mid, '목록이 바뀌었습니다. 다시 시도해 주세요.', kbMain_());
     setState_(chatId, { op: 'codel-confirm', name: model[xi].name, by: actor, at: Date.now(), mid: mid });
-    return tgEdit_(chatId, mid, '🗑 업체 〔' + esc_(model[xi].name) + '〕 를 도메인 ' + model[xi].domains.length + '개와 함께 삭제할까요?',
+    return tgReply_(chatId, mid, '🗑 업체 〔' + esc_(model[xi].name) + '〕 를 도메인 ' + model[xi].domains.length + '개와 함께 삭제할까요?',
       { inline_keyboard: [[{ text: '예, 삭제', callback_data: 'codelok' }, { text: '아니오', callback_data: 'x' }]] });
   }
   if (head === 'codelok') {
     var stc = getState_(chatId);
     clearState_(chatId);
-    if (!stc || stc.op !== 'codel-confirm') return tgEdit_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
-    if (stc.mid && stc.mid !== mid) return tgEdit_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
+    if (!stc || stc.op !== 'codel-confirm') return tgReply_(chatId, mid, '시간이 지나 취소되었습니다. 다시 시도해 주세요.', kbMain_());
+    if (stc.mid && stc.mid !== mid) return tgReply_(chatId, mid, '지난 확인 버튼입니다. 새로 시작해 주세요.', kbMain_());
     try {
       var co = opRemoveCompany_(stc.name, actor);
-      return tgEdit_(chatId, mid, '✅ 업체 〔' + esc_(co.name) + '〕 삭제됨 (도메인 ' + co.domains.length + '개)\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
-    } catch (e) { return tgEdit_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+      return tgReply_(chatId, mid, '✅ 업체 〔' + esc_(co.name) + '〕 삭제됨 (도메인 ' + co.domains.length + '개)\n\n<blockquote>잘못 지웠으면 [↩️ 되돌리기]</blockquote>', kbMain_());
+    } catch (e) { return tgReply_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
   }
 
   if (head === 'cfgh') {
     setState_(chatId, { op: 'cfg-hours', by: actor, at: Date.now() });
-    return tgEdit_(chatId, mid, '🕘 점검할 시각을 한국시간 기준 숫자로 보내주세요.\n\n<blockquote>예) 9 21   → 매일 09시·21시\n예) 7 13 19 → 하루 세 번\n(취소: 취소)</blockquote>');
+    return tgReply_(chatId, mid, '🕘 점검할 시각을 한국시간 기준 숫자로 보내주세요.\n\n<blockquote>예) 9 21   → 매일 09시·21시\n예) 7 13 19 → 하루 세 번\n(취소: 취소)</blockquote>');
   }
   if (head === 'cfgn') {
     var s2 = settings_();
     var nv = s2.notify === 'all' ? 'problem' : 'all';
     setProp_('NOTIFY_LEVEL', nv); sysWrite_(); log_(actor, '설정', '알림 수준 ' + (nv === 'all' ? '항상' : '문제만'));
-    return tgEdit_(chatId, mid, settingsText_(), kbSettings_());
+    return tgReply_(chatId, mid, settingsText_(), kbSettings_());
   }
   if (head === 'cfgp') {
     var s3 = settings_();
     setProp_('PAUSED', s3.paused ? 'no' : 'yes'); sysWrite_();
     log_(actor, '설정', s3.paused ? '자동 점검 재개' : '자동 점검 일시중지');
-    return tgEdit_(chatId, mid, settingsText_(), kbSettings_());
+    return tgReply_(chatId, mid, settingsText_(), kbSettings_());
   }
 
   if (head === 'undo') {
-    if (!prop_('UNDO_LABEL', '')) return tgEdit_(chatId, mid, '되돌릴 내용이 없습니다.', kbMain_());
-    return tgEdit_(chatId, mid, '↩️ 직전 <b>' + esc_(prop_('UNDO_LABEL', '변경')) + '</b> 작업(' + esc_(prop_('UNDO_AT', '-')) + ')을 되돌릴까요?',
+    if (!prop_('UNDO_LABEL', '')) return tgReply_(chatId, mid, '되돌릴 내용이 없습니다.', kbMain_());
+    return tgReply_(chatId, mid, '↩️ 직전 <b>' + esc_(prop_('UNDO_LABEL', '변경')) + '</b> 작업(' + esc_(prop_('UNDO_AT', '-')) + ')을 되돌릴까요?',
       { inline_keyboard: [[{ text: '예, 되돌리기', callback_data: 'undook' }, { text: '아니오', callback_data: 'x' }]] });
   }
   if (head === 'undook') {
@@ -1312,11 +1378,11 @@ function handleCallback_(cb) {
       var lbl = withLock_(function () { return undo_(); });
       log_(actor, '되돌리기', lbl + ' 작업을 되돌림');
       sysWrite_();
-      return tgEdit_(chatId, mid, '↩️ 되돌렸습니다 (' + esc_(lbl) + ').', kbMain_());
-    } catch (e) { return tgEdit_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
+      return tgReply_(chatId, mid, '↩️ 되돌렸습니다 (' + esc_(lbl) + ').', kbMain_());
+    } catch (e) { return tgReply_(chatId, mid, '❌ ' + esc_(String(e.message || e)), kbMain_()); }
   }
 
-  return tgEdit_(chatId, mid, menuText_(), kbMain_());
+  return tgReply_(chatId, mid, menuText_(), kbMain_());
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1329,6 +1395,16 @@ function handleCallback_(cb) {
 function processUpdate_(update) {
   if (!update) return 'ignored: empty';
   if (seenUpdate_(update.update_id)) return 'ignored: duplicate';
+
+  // ★ 담당자가 조작을 시작했다 → 빠른 응답조를 깨운다.
+  //   ① 이미 깨어 있거나 방금 깨웠으면 아무 일도 하지 않는다(§wakeRelay_)
+  //   ② 반드시 '허용된 채널'일 때만 — 모르는 사람이 봇에게 말을 걸어
+  //      깃허브 실행을 유발하지 못하게 한다.
+  try {
+    var srcChat = (update.callback_query && update.callback_query.message && update.callback_query.message.chat && update.callback_query.message.chat.id) ||
+      ((update.message || update.channel_post || {}).chat || {}).id || '';
+    if (srcChat && canControl_(String(srcChat))) wakeRelay_();
+  } catch (ignoreWake) {}
 
   if (update.callback_query) {
     try { handleCallback_(update.callback_query); }
@@ -1392,6 +1468,10 @@ function handleTelegram_(e) {
 function pollUpdates() {
   var bot = prop_('BOT_TOKEN');
   if (!bot) return;
+
+  // ★ 깃허브 대기조가 살아 있으면 그쪽이 초 단위로 처리한다.
+  //   여기서 또 가져가면 같은 명령을 두 곳이 나눠 가져 순서가 꼬인다 — 조용히 물러난다.
+  if (relayAlive_()) return;
 
   // 두 실행이 겹치면 같은 명령을 두 번 처리한다 — 겹치면 조용히 물러난다.
   var lock = LockService.getScriptLock();
@@ -1504,6 +1584,30 @@ function doPost(e) {
       writeResults_(body.rows || [], body.meta || {});
       return json_({ ok: true, written: Math.max(0, (body.rows || []).length - 1) });
     }
+    // ─── 깨우기형 대기조 전용 ───────────────────────────────
+    //   대기조는 텔레그램에 길게 귀 대고 있다가 명령이 오면 즉시 여기로 넘긴다.
+    if (action === 'relay-hello') {
+      if (relayAlive_()) return json_({ ok: true, alreadyAlive: true });   // 이미 다른 대기조가 있다
+      relayTouch_();
+      setProp_('RELAY_STARTED_AT', nowKst_());
+      return json_({ ok: true, offset: Number(prop_('TG_OFFSET', '0')) || 0, idleMinutes: RELAY_IDLE_MIN });
+    }
+    if (action === 'relay-ping') {           // 살아 있다는 신호(끊기면 1분 방식으로 자동 복귀)
+      relayTouch_();
+      if (body.offset) setProp_('TG_OFFSET', String(body.offset));
+      return json_({ ok: true });
+    }
+    if (action === 'relay-update') {         // 명령 한 건 전달
+      relayTouch_();
+      var relayResult = processUpdate_(body.update || null);
+      if (body.offset) setProp_('TG_OFFSET', String(body.offset));
+      return json_({ ok: true, result: relayResult });
+    }
+    if (action === 'relay-bye') {            // 대기조 종료 — 즉시 1분 방식으로 복귀
+      if (body.offset) setProp_('TG_OFFSET', String(body.offset));
+      relayStop_();
+      return json_({ ok: true });
+    }
     if (action === 'fail') {
       clearWatchdog_();
       setProp_('RUN_STATE', '실패');
@@ -1589,6 +1693,9 @@ function setupAll() {
   // ★ 웹훅이 아니라 폴링으로 받는다(위 pollUpdates 주석 참고). 웹훅이 남아 있으면 폴링이 막히므로 먼저 뗀다.
   try { deleteWebhook(); } catch (ignore) {}
   setProp_('TG_OFFSET', '0');
+  relayStop_();
+  try { setupCommands(); } catch (ignore2) {}
+  try { pinGuide(); } catch (ignore3) {}
   sysWrite_('설치 완료');
   Logger.log('✅ 설치 완료 — 시트 탭·스케줄·텔레그램 연결이 끝났습니다(명령은 1분 이내 처리).');
 }
@@ -1642,7 +1749,14 @@ function deleteWebhook() {
 function diag_() {
   var out = { ok: true, at: nowKst_() };
   out.allowedChats = allowedChats_();
-  out.수신방식 = '폴링(1분마다 가지러 감)';
+  out.수신방식 = relayAlive_() ? '대기조 가동중(초 단위)' : '폴링(1분마다 가지러 감)';
+  out.대기조 = {
+    켜짐: prop_('RELAY_ENABLED', 'yes') !== 'no',
+    지금_살아있나: relayAlive_(),
+    마지막_깨운시각: prop_('RELAY_LAST_WAKE_KST', '(없음)'),
+    마지막_시작시각: prop_('RELAY_STARTED_AT', '(없음)'),
+    마지막_오류: prop_('RELAY_LAST_ERROR', '(없음)'),
+  };
   out.처리한_명령번호 = prop_('TG_OFFSET', '0');
   out.lastUpdate = prop_('LAST_UPDATE_DEBUG', '(아직 없음)');
   out.lastError = prop_('LAST_ERROR', '(없음)');
@@ -1684,6 +1798,44 @@ function diag_() {
     out.webhookError = String(e && e.message || e);
   }
   return out;
+}
+
+/** 입력창 옆 '/' 메뉴에 명령을 등록한다(텔레그램은 명령 이름에 한글을 못 쓴다) */
+function setupCommands() {
+  tgApi_('setMyCommands', {
+    commands: [
+      { command: 'menu',  description: '조작 패널 열기' },
+      { command: 'check', description: '지금 점검' },
+      { command: 'list',  description: '등록된 주소 보기' },
+      { command: 'help',  description: '사용법' },
+    ],
+  });
+  Logger.log('명령 메뉴 등록 완료 — /menu /check /list /help');
+}
+
+/** 채널 맨 위에 고정해 둘 안내문 — 버튼이 없으므로 시간이 지나도 유효하다 */
+function pinText_() {
+  return [
+    '📌 <b>접속점검 — 이 채널 쓰는 법</b>',
+    '',
+    '<blockquote>조작 패널을 부르려면 아무 때나',
+    '<b>ㅁ</b>  한 글자를 보내세요.',
+    '(메뉴 · /menu 도 같습니다)</blockquote>',
+    '',
+    '<blockquote>패널이 뜨면 버튼으로 전부 조작할 수 있습니다.',
+    '자세한 사용법은 패널의 [❓ 도움말].</blockquote>',
+  ].join('\n');
+}
+
+/** 안내문을 보내고 채널 상단에 고정한다(봇이 관리자가 아니면 고정만 조용히 실패) */
+function pinGuide() {
+  var ids = allowedChats_();
+  if (!ids.length) throw new Error('ALLOWED_CHAT_IDS 속성이 비어 있습니다');
+  var r = tgSend_(ids[0], pinText_());
+  var mid = r && r.result && r.result.message_id;
+  if (!mid) { Logger.log('안내문 발송 실패'); return; }
+  tgApi_('pinChatMessage', { chat_id: ids[0], message_id: mid, disable_notification: true });
+  Logger.log('안내문을 보내고 고정했습니다 → ' + ids[0]);
 }
 
 /** 시트가 제대로 읽히는지 확인 */
