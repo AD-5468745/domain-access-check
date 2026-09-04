@@ -5,7 +5,7 @@ import {
   buildSheetRows, buildTelegramReport, countByStatus, groupProblems,
   statusCell, escapeHtml, SHEET_HEADER,
 } from '../lib/core.js';
-import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked } from '../lib/probe.js';
+import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked, looksKoreaBlocked } from '../lib/probe.js';
 import { recheckBlocked, recheckOne } from '../lib/browser.js';
 import { splitForTelegram } from '../check.js';
 
@@ -442,6 +442,38 @@ t('본문이 차단 페이지면 봇차단', () =>
 t('평범한 403 은 봇차단 아님', () => assert.equal(looksBotBlocked(403, hdr({ server: 'nginx' }), '<h1>Forbidden</h1>'), false));
 t('200 은 봇차단일 수 없음', () => assert.equal(looksBotBlocked(200, hdr({ 'cf-ray': 'abc' }), ''), false));
 t('404 는 봇차단 아님', () => assert.equal(looksBotBlocked(404, hdr({ 'cf-ray': 'abc' }), ''), false));
+
+// ── 한국 심의 차단 — 이것만이 '한국에서 안 열린다'는 진짜 신호 ──
+t('warning.or.kr 로 넘어가면 한국 차단', () =>
+  assert.equal(looksKoreaBlocked('https://www.warning.or.kr/', ''), true));
+t('본문에 심의 안내가 있으면 한국 차단', () =>
+  assert.equal(looksKoreaBlocked('https://a.com/', '불법·유해정보 차단 안내 방송통신심의위원회'), true));
+t('평범한 페이지는 한국 차단 아님', () => assert.equal(looksKoreaBlocked('https://a.com/', '<h1>hello</h1>'), false));
+t('warning 이라는 글자만으로는 차단 아님', () =>
+  assert.equal(looksKoreaBlocked('https://warning-shop.com/', 'warning'), false));
+
+t('심의 차단 안내로 넘어가면 이상(차단)으로 찍힌다', async () => {
+  const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' }, {
+    retries: 0,
+    fetchImpl: async () => ({
+      status: 200, url: 'https://www.warning.or.kr/i1.html', headers: hdr({}),
+      text: async () => '', body: null,
+    }),
+  });
+  assert.equal(r.status, 'down');
+  assert.equal(/한국에서 차단됨/.test(r.note), true);
+});
+t('심의 차단이 방화벽 판정보다 먼저다', async () => {
+  const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' }, {
+    retries: 0,
+    fetchImpl: async () => ({
+      status: 403, url: 'https://a.com/?code=X', headers: hdr({ 'cf-ray': 'x' }),
+      text: async () => '불법·유해정보 차단 안내', body: null,
+    }),
+  });
+  assert.equal(r.status, 'down');
+  assert.equal(/한국에서 차단됨/.test(r.note), true);
+});
 
 t('방화벽 403 은 제한이 아니라 봇차단으로 찍힌다', async () => {
   const r = await checkOne({ company: 'A', domain: 'https://a.com/?code=X', host: 'a.com' }, {
