@@ -179,6 +179,7 @@ function makeEnv() {
 
 const GS = fs.readFileSync(new URL('../apps-script/bridge.gs', import.meta.url), 'utf8');
 const EXPORTS = ['doGet', 'doPost', 'hourlyTick', 'watchdog', 'setupAll', 'applySchedule_', 'pollUpdates', 'processUpdate_',
+  'setupEdge', 'setupPolling', 'mode_',
   'loadModel_', 'saveModel_', 'settings_', 'menuText_', 'listText_', 'normalizeDomain_',
   'opAddDomains_', 'opRemoveDomain_', 'opAddCompany_', 'opRemoveCompany_', 'opRenameCompany_',
   'opMoveDomain_', 'opReplaceDomain_', 'undo_', 'sysWrite_', 'splitForTelegram_'];
@@ -881,6 +882,69 @@ const lastText = (env) => {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 11-3-5. 즉답기(웹훅) 모드 — 클라우드플레어 워커가 받아 넘긴다
+// ═══════════════════════════════════════════════════════════
+const edge = (B, update, preAnswered) => JSON.parse(B.doPost({
+  parameter: {},
+  postData: { contents: JSON.stringify({ token: 'tok', action: 'edge', update, preAnswered: !!preAnswered }) },
+}).text);
+
+{
+  const { env, B } = fresh(SEED);
+  const r = edge(B, { channel_post: { chat: { id: -1001 }, message_id: 5, text: '목록' } });
+  t('즉답기가 넘긴 글 명령을 처리', () => assert.equal(r.result, 'ok'));
+  t('즉답기가 넘긴 명령이 실제로 답을 보냄', () => assert.equal(/등록된 도메인/.test(lastText(env)), true));
+}
+{
+  const { env, B } = fresh(SEED);
+  edge(B, { callback_query: { id: 'e1', data: 'list', from: { id: 7, first_name: '박담당' }, message: { chat: { id: '-1001' }, message_id: 55 } } }, true);
+  t('즉답기가 먼저 답했으면 구글은 버튼 응답을 안 보냄', () => assert.equal(env.sent.some((x) => x.method === 'answerCallbackQuery'), false));
+  t('그래도 화면은 정상으로 나감', () => assert.equal(/등록된 도메인/.test(lastText(env)), true));
+}
+{
+  // ★ 가장 위험한 회귀: 웹훅 모드인데 1분 폴링이 살아 있으면
+  //   409 자동복구가 '우리 웹훅'을 지워버려 시스템이 통째로 먹통이 된다.
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  let polled = 0;
+  env.tgReply = (method) => {
+    if (method === 'getUpdates') { polled += 1; return { ok: true, result: [] }; }
+    return { ok: true, result: {} };
+  };
+  B.pollUpdates();
+  t('웹훅 모드면 폴링이 텔레그램을 건드리지 않는다', () => assert.equal(polled, 0));
+  t('웹훅 모드면 폴링이 웹훅을 지우지 않는다', () => assert.equal(env.sent.some((x) => x.method === 'deleteWebhook'), false));
+  t('웹훅 모드면 대기조를 깨우지 않는다', () => assert.equal(relayRuns(env).length, 0));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  post(B, msg('ㅁ'));
+  t('웹훅 모드면 패널이 즉시 반응이라고 알려준다', () => assert.equal(/즉시 반응/.test(lastText(env)), true));
+}
+{
+  // 되돌리기 — 1분이면 예전 방식으로 복귀해야 한다
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  B.setupPolling();
+  t('setupPolling 이 웹훅을 떼어냄', () => assert.equal(env.sent.some((x) => x.method === 'deleteWebhook'), true));
+  t('setupPolling 이 폴링 스케줄을 되살림', () => assert.equal(env.triggers.some((x) => x.getHandlerFunction() === 'pollUpdates'), true));
+  let polled = 0;
+  env.tgReply = (method) => { if (method === 'getUpdates') { polled += 1; return { ok: true, result: [] }; } return { ok: true, result: {} }; };
+  B.pollUpdates();
+  t('되돌린 뒤 폴링이 다시 동작', () => assert.equal(polled, 1));
+}
+{
+  // 즉답기 전환은 필요한 값이 없으면 조용히 잘못 켜지지 않고 분명히 실패해야 한다
+  const { B } = fresh(SEED);
+  t('워커 주소가 없으면 전환을 거부', () => {
+    let threw = false;
+    try { B.setupEdge(); } catch (e) { threw = /WORKER_URL/.test(String(e.message || e)); }
+    assert.equal(threw, true);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
 // 11-3-3. 자동 예열 — '첫 조작만 느린' 문제를 없앤다
 // ═══════════════════════════════════════════════════════════
 {
@@ -1421,7 +1485,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
     assert.deepEqual(missing, []);
   });
   t('SETUP 이 안내한 실행 함수가 코드에 존재', () => {
-    const fns = ['setupAll', 'pollUpdates', 'getWebhookInfo', 'deleteWebhook', 'testRead', 'testChannel', 'applySchedule_', 'setupCommands', 'pinGuide'];
+    const fns = ['setupAll', 'pollUpdates', 'getWebhookInfo', 'deleteWebhook', 'testRead', 'testChannel', 'applySchedule_', 'setupCommands', 'pinGuide', 'setupEdge', 'setupPolling'];
     const missing = fns.filter((f) => !new RegExp(`function\\s+${f}\\s*\\(`).test(GSRC) || SETUP.indexOf(f) === -1);
     assert.deepEqual(missing, []);
   });
@@ -1432,6 +1496,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
 // ═══════════════════════════════════════════════════════════
 {
   const RELAY_JS = fs.readFileSync(new URL('../relay.js', import.meta.url), 'utf8');
+  const WORKER_JS = fs.readFileSync(new URL('../worker/worker.js', import.meta.url), 'utf8');
   const RELAY_YML = fs.readFileSync(new URL('../.github/workflows/relay.yml', import.meta.url), 'utf8');
   const CHECK_YML = fs.readFileSync(new URL('../.github/workflows/check.yml', import.meta.url), 'utf8');
   const GS2 = fs.readFileSync(new URL('../apps-script/bridge.gs', import.meta.url), 'utf8');
@@ -1465,6 +1530,30 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   });
   t("본문이 사라져 생긴 'unauthorized' 는 답으로 인정하지 않는다", () => {
     assert.equal(/unauthorized\/i\.test/.test(RELAY_JS), true);
+  });
+  // ★ 즉답기(워커)도 같은 302 함정을 피해야 한다 — 같은 사고를 두 번 겪지 않게 고정한다
+  t('즉답기도 넘김을 직접 판단한다', () => {
+    assert.equal(/redirect: 'manual'/.test(WORKER_JS), true);
+    assert.equal(/loc\.indexOf\('\/exec'\)/.test(WORKER_JS), true);
+    assert.equal(/unauthorized\/i\.test/.test(WORKER_JS), true);
+  });
+  t('즉답기가 텔레그램에 즉시 200 을 돌려준다', () => {
+    assert.equal(/ctx\.waitUntil\(handleUpdate/.test(WORKER_JS), true);
+    assert.equal(/new Response\('ok', \{ status: 200 \}\)/.test(WORKER_JS), true);
+  });
+  t('즉답기가 구글보다 먼저 버튼에 답한다', () => {
+    const at = WORKER_JS.indexOf("'answerCallbackQuery'");
+    const fwd = WORKER_JS.indexOf("action: 'edge'");
+    assert.equal(at !== -1 && at < fwd, true);
+  });
+  t('즉답기는 텔레그램이 보낸 것만 받는다', () => {
+    assert.equal(/X-Telegram-Bot-Api-Secret-Token/.test(WORKER_JS), true);
+    assert.equal(/!env\.WEBHOOK_SECRET \|\|/.test(WORKER_JS), true, '암호가 없으면 아예 거부해야 한다');
+  });
+  t('즉답기 로그에 비밀값·내용이 남지 않는다', () => {
+    const logs = WORKER_JS.match(/console\.log\(([^;]*)\)/g) || [];
+    const leaky = logs.filter((l) => /update|\.text|chat|JSON\.stringify|TOKEN/.test(l));
+    assert.deepEqual(leaky, []);
   });
   t('브리지가 GET 에 잠금값을 요구한다(사라진 본문이 통과하지 못하게)', () => {
     const at = GS2.indexOf('function doGet');

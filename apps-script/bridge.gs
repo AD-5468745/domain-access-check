@@ -115,6 +115,14 @@ function normalizeDomain_(raw) {
 function props_() { return PropertiesService.getScriptProperties(); }
 
 /**
+ * ★ 명령을 받는 방식은 두 가지고, 둘은 동시에 못 쓴다(텔레그램 제약).
+ *   'poll'    — 앱스스크립트가 1분마다 가지러 간다 + 깃허브 대기조(기본값, 서비스 0개)
+ *   'webhook' — 클라우드플레어 즉답기가 받아서 넘겨준다(가장 빠름)
+ *   전환: setupEdge() / setupPolling()
+ */
+function mode_() { return prop_('MODE', 'poll') === 'webhook' ? 'webhook' : 'poll'; }
+
+/**
  * ★ 설정값 읽기는 한 번 실행에 스무 번 넘게 일어난다. 그때마다 구글에 물어보면
  *   그것만으로 몇 초가 쌓인다(2026-09-05 반응 지연 원인 중 하나).
  *   실행 한 번 동안은 통째로 한 번만 읽어 기억해 둔다.
@@ -734,6 +742,9 @@ function menuText_() {
  *   그래서 누르기 '전에' 알 수 있게 패널에 상태를 적는다.
  */
 function speedLine_() {
+  if (mode_() === 'webhook') {
+    return '<blockquote>⚡ <b>즉시 반응</b> — 누르면 바로 받습니다</blockquote>';
+  }
   if (relayAlive_()) {
     return '<blockquote>⚡ <b>지금은 빠릅니다</b> — 버튼 반응 2~4초</blockquote>';
   }
@@ -849,6 +860,7 @@ function relayOwner_(body) {
  *   끄고 싶으면 스크립트 속성 RELAY_PREHEAT = no.
  */
 function preheatRelay_() {
+  if (mode_() === 'webhook') return;                      // 즉답기가 받는다 — 예열 불필요
   if (prop_('RELAY_PREHEAT', 'yes') === 'no') return;
   if (relayAlive_()) return;
   var h = kstHour_();
@@ -861,6 +873,7 @@ function preheatRelay_() {
 
 function wakeRelay_() {
   try {
+    if (mode_() === 'webhook') return;                    // 즉답기가 받는다 — 대기조 불필요
     if (prop_('RELAY_ENABLED', 'yes') === 'no') return;   // 끄고 싶으면 이 속성만 no 로
     if (relayAlive_()) return;                            // 이미 깨어 있다
     var last = Number(prop_('RELAY_WAKE_AT', '0')) || 0;
@@ -1610,6 +1623,10 @@ function handleTelegram_(e) {
 function pollUpdates() {
   PROP_MEMO = null;
   PRE_ANSWERED = false;      // 폴링으로 직접 가져온 명령은 아무도 먼저 답하지 않았다
+
+  // ★ 즉답기(웹훅) 모드면 여기서 아무것도 하지 않는다.
+  //   특히 아래 409 자동복구가 '우리 웹훅'을 지워버리는 사고를 막는다.
+  if (mode_() === 'webhook') return;
   var bot = prop_('BOT_TOKEN');
   if (!bot) return;
 
@@ -1733,6 +1750,16 @@ function doPost(e) {
       writeResults_(body.rows || [], body.meta || {});
       return json_({ ok: true, written: Math.max(0, (body.rows || []).length - 1) });
     }
+    // ─── 즉답기(클라우드플레어 워커) 전용 ────────────────────
+    //   워커가 텔레그램에서 받은 명령을 그대로 넘겨준다.
+    //   preAnswered=true 면 버튼 응답은 워커가 이미 보냈다는 뜻이다.
+    if (action === 'edge') {
+      PRE_ANSWERED = !!body.preAnswered;
+      var edgeResult = processUpdate_(body.update || null);
+      PRE_ANSWERED = false;
+      return json_({ ok: true, result: edgeResult });
+    }
+
     // ─── 깨우기형 대기조 전용 ───────────────────────────────
     //   대기조는 텔레그램에 길게 귀 대고 있다가 명령이 오면 즉시 여기로 넘긴다.
     // ★ 대기조마다 고유번호(relayId)를 붙인다.
@@ -1870,6 +1897,48 @@ function applySchedule_() {
   Logger.log('스케줄 설정 완료 — 매시간 점검 확인 + 매분 명령 수신, 점검 시각: ' + settings_().hours.join(','));
 }
 
+/**
+ * ★ 즉답기(클라우드플레어 워커)로 전환한다. 편집기에서 한 번 실행.
+ *   필요한 속성: WORKER_URL (예: https://xxx.workers.dev), WEBHOOK_SECRET
+ *   되돌리려면 setupPolling() 을 실행하면 된다.
+ */
+function setupEdge() {
+  var bot = prop_('BOT_TOKEN');
+  if (!bot) throw new Error('BOT_TOKEN 속성이 없습니다');
+  var worker = String(prop_('WORKER_URL', '')).replace(/\/+$/, '');
+  if (!/^https:\/\/.+/.test(worker)) throw new Error('WORKER_URL 속성에 워커 주소(https://...)를 넣어주세요');
+  var secret = prop_('WEBHOOK_SECRET', '');
+  if (!secret) throw new Error('WEBHOOK_SECRET 속성이 없습니다(아무 문자열, 워커에도 같은 값)');
+
+  var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + bot + '/setWebhook', {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify({
+      url: worker + '/tg',
+      secret_token: secret,
+      allowed_updates: ['message', 'channel_post', 'callback_query'],
+      max_connections: 40,
+    }),
+    muteHttpExceptions: true,
+  });
+  var body = JSON.parse(res.getContentText());
+  if (!body.ok) throw new Error('웹훅 등록 실패: ' + String(body.description || '').slice(0, 200));
+
+  setProp_('MODE', 'webhook');
+  relayStop_();
+  sysWrite_('즉답기 전환');
+  Logger.log('✅ 즉답기로 전환했습니다 — 이제 버튼을 누르면 바로 반응합니다.');
+}
+
+/** ★ 예전 방식(1분 폴링 + 깃허브 대기조)으로 되돌린다. 1분이면 원상복구. */
+function setupPolling() {
+  setProp_('MODE', 'poll');
+  try { deleteWebhook(); } catch (ignore) {}
+  relayStop_();
+  applySchedule_();
+  sysWrite_('폴링 방식 복귀');
+  Logger.log('✅ 예전 방식(1분 폴링 + 대기조)으로 되돌렸습니다.');
+}
+
 function setupWebhook() {
   var bot = prop_('BOT_TOKEN');
   if (!bot) throw new Error('BOT_TOKEN 속성이 없습니다');
@@ -1906,7 +1975,8 @@ function deleteWebhook() {
 function diag_() {
   var out = { ok: true, at: nowKst_() };
   out.allowedChats = allowedChats_();
-  out.수신방식 = relayAlive_() ? '대기조 가동중(초 단위)' : '폴링(1분마다 가지러 감)';
+  out.수신방식 = mode_() === 'webhook' ? '즉답기(웹훅) — 가장 빠름'
+    : (relayAlive_() ? '대기조 가동중(초 단위)' : '폴링(1분마다 가지러 감)');
   out.대기조 = {
     켜짐: prop_('RELAY_ENABLED', 'yes') !== 'no',
     지금_살아있나: relayAlive_(),
