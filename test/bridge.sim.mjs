@@ -1520,7 +1520,8 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('지금 개수와 점검 결과가 구분되게 보인다', () => {
     assert.equal(/도메인 3개/.test(txt), true, '지금 등록 개수가 그대로 보여야 한다');
     // 시각과 결과를 한 줄로 붙여 써야 '지금 개수'로 오해되지 않는다
-    assert.equal(/마지막 점검 2026-08-28 11:00 → 총 7개 모두 정상 ✅/.test(txt), true);
+    assert.equal(/최근 점검 2026-08-28 11:00/.test(txt), true);
+    assert.equal(/최근 점검결과 총 7개 모두 정상 ✅/.test(txt), true);
   });
   t('목록을 고친 뒤 점검 안 했으면 알려준다', () =>
     assert.equal(/아직 점검하지 않았습니다/.test(txt), true));
@@ -1530,7 +1531,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   const { env, B } = fresh(SEED);
   post(B, msg('메뉴'));
   t('점검 기록이 없으면 그렇게만 쓴다', () => {
-    assert.equal(/마지막 점검 아직 없음/.test(lastText(env)), true);
+    assert.equal(/최근 점검 아직 없음/.test(lastText(env)), true);
     assert.equal(/등록된 도메인 없음/.test(lastText(env)), false);
   });
 }

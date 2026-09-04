@@ -746,15 +746,18 @@ function menuText_() {
  *   그래서 누르기 '전에' 알 수 있게 패널에 상태를 적는다.
  */
 /**
- * '언제 점검했고 결과가 무엇이었나'를 한 줄로.
+ * '언제 점검했고 결과가 무엇이었나'.
  * ★ 결과 요약은 점검기가 보내준 한 줄 성적표다(예: 총 7개 모두 정상 ✅).
- *   시각과 떼어 놓으면 '지금 등록 개수'로 읽힌다 — 반드시 한 줄에 붙여 쓴다.
+ *   라벨 없이 두면 '지금 등록 개수'로 읽힌다 — '최근 점검결과' 라고 반드시 앞에 붙인다
+ *   (2026-09-05 에이든 지시).
  */
 function lastCheckLine_() {
   var at = prop_('LAST_RESULT_AT', '');
-  if (!at) return '마지막 점검 아직 없음';
+  if (!at) return '최근 점검 아직 없음';
   var sum = prop_('LAST_RESULT_SUMMARY', '');
-  return '마지막 점검 ' + esc_(at) + (sum ? ' → ' + esc_(sum) : '');
+  var line = '최근 점검 ' + esc_(at);
+  if (sum) line += '\n최근 점검결과 ' + esc_(sum);
+  return line;
 }
 
 /**
