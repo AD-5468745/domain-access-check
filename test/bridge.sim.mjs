@@ -1126,7 +1126,7 @@ const lastText = (env) => {
     assert.deepEqual(missing, []);
   });
   t('SETUP 이 안내한 실행 함수가 코드에 존재', () => {
-    const fns = ['setupAll', 'setupWebhook', 'getWebhookInfo', 'deleteWebhook', 'testRead', 'testChannel', 'applySchedule_'];
+    const fns = ['setupAll', 'pollUpdates', 'getWebhookInfo', 'deleteWebhook', 'testRead', 'testChannel', 'applySchedule_'];
     const missing = fns.filter((f) => !new RegExp(`function\\s+${f}\\s*\\(`).test(GSRC) || SETUP.indexOf(f) === -1);
     assert.deepEqual(missing, []);
   });
