@@ -30,6 +30,11 @@ const HARD_STOP_MS = 16 * 60 * 1000;   // 워크플로 제한(20분)보다 넉�
 const LONG_POLL_S = 25;                // 텔레그램에 '새 명령 생길 때까지' 귀 대고 있는 시간
 const ALLOWED = ['message', 'channel_post', 'callback_query'];
 
+// ★ 이 대기조의 고유번호.
+//   배포 직후처럼 브리지 첫 응답이 느리면 아래에서 인사를 다시 시도하는데,
+//   번호가 없으면 '이미 다른 대기조가 있다'며 스스로 물러나 버린다(2026-09-05 실측).
+const RELAY_ID = globalThis.crypto.randomUUID();
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 어떤 오류 메시지에도 비밀값이 섞이지 않게 한다 */
@@ -51,12 +56,12 @@ async function fetchJson(url, opts, timeoutMs) {
 }
 
 /** 구글 앱스스크립트 브리지 호출 — 반드시 POST(한국 경유 GET 이 막히는 사례가 있었다) */
-function bridge(action, payload) {
+function bridge(action, payload, timeoutMs) {
   return fetchJson(BRIDGE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action }, payload || {})),
-  }, 30000);
+    body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action, relayId: RELAY_ID }, payload || {})),
+  }, timeoutMs || 45000);
 }
 
 /** 텔레그램에 길게 귀 대고 있기. 회복 불가능한 상황이면 null 을 돌려준다. */
@@ -81,11 +86,17 @@ async function main() {
     return;
   }
 
-  let hello;
-  try { hello = await bridge('relay-hello', {}); }
-  catch (e) { console.log('브리지에 연결하지 못했습니다: ' + safeMsg(e)); return; }
-
-  if (!hello || !hello.ok) { console.log('브리지가 시작을 거절했습니다 — 종료합니다.'); return; }
+  // 배포 직후 등에는 브리지 첫 응답이 느릴 수 있다 → 같은 고유번호로 최대 3번 인사한다.
+  let hello = null;
+  for (let attempt = 1; attempt <= 3 && !hello; attempt++) {
+    try { hello = await bridge('relay-hello', {}, 45000); }
+    catch (e) {
+      console.log('브리지 인사 ' + attempt + '차 실패: ' + safeMsg(e));
+      if (attempt < 3) await sleep(2000);
+    }
+  }
+  if (!hello) { console.log('브리지에 연결하지 못했습니다 — 1분 방식에 맡기고 종료합니다.'); return; }
+  if (!hello.ok) { console.log('브리지가 시작을 거절했습니다 — 종료합니다.'); return; }
   if (hello.alreadyAlive) { console.log('이미 다른 대기조가 돌고 있습니다 — 종료합니다.'); return; }
 
   let offset = Number(hello.offset || 0) || 0;
@@ -112,8 +123,11 @@ async function main() {
     failures = 0;
 
     if (!list.length) {
-      try { await bridge('relay-ping', { offset }); }
+      let beat = null;
+      try { beat = await bridge('relay-ping', { offset }); }
       catch (e) { console.log('하트비트 실패 — 1분 방식에 넘기고 종료합니다: ' + safeMsg(e)); break; }
+      // 브리지가 '지난 대기조'로 판정하면 새 대기조가 자리를 넘겨받은 것이다 — 조용히 비켜준다.
+      if (beat && beat.ok === false) { console.log('다른 대기조에게 자리를 넘기고 종료합니다.'); return; }
       continue;
     }
 

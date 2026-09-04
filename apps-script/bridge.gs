@@ -724,7 +724,14 @@ function relayAlive_() {
 
 function relayTouch_() { setProp_('RELAY_ALIVE_UNTIL', String(Date.now() + RELAY_ALIVE_MS)); }
 
-function relayStop_() { setProp_('RELAY_ALIVE_UNTIL', '0'); }
+function relayStop_() { setProp_('RELAY_ALIVE_UNTIL', '0'); setProp_('RELAY_ID', ''); }
+
+/** 지금 등록된 대기조가 보낸 신호인가 (고유번호가 없던 옛 방식은 그대로 허용) */
+function relayOwner_(body) {
+  var rid = String((body && body.relayId) || '');
+  if (!rid) return true;
+  return prop_('RELAY_ID', '') === rid;
+}
 
 function wakeRelay_() {
   try {
@@ -1586,27 +1593,31 @@ function doPost(e) {
     }
     // ─── 깨우기형 대기조 전용 ───────────────────────────────
     //   대기조는 텔레그램에 길게 귀 대고 있다가 명령이 오면 즉시 여기로 넘긴다.
+    // ★ 대기조마다 고유번호(relayId)를 붙인다.
+    //   2026-09-05 실측: 배포 직후 첫 요청이 느려 대기조 쪽에서 30초 만에 포기했는데,
+    //   구글은 그 요청을 뒤늦게 실행해 '대기조 살아있음'만 켜둔 상태가 되었다.
+    //   → 대기조가 죽었는데 폴링도 물러나 최대 90초 공백. 고유번호로 이걸 막는다:
+    //     같은 번호로 다시 인사하면 '내 자리'로 인정하고, 지난 대기조의 신호는 무시한다.
     if (action === 'relay-hello') {
-      if (relayAlive_()) return json_({ ok: true, alreadyAlive: true });   // 이미 다른 대기조가 있다
+      var rid = String(body.relayId || '');
+      if (relayAlive_() && prop_('RELAY_ID', '') !== rid) return json_({ ok: true, alreadyAlive: true });
+      setProp_('RELAY_ID', rid);
       relayTouch_();
       setProp_('RELAY_STARTED_AT', nowKst_());
       return json_({ ok: true, offset: Number(prop_('TG_OFFSET', '0')) || 0, idleMinutes: RELAY_IDLE_MIN });
     }
-    if (action === 'relay-ping') {           // 살아 있다는 신호(끊기면 1분 방식으로 자동 복귀)
-      relayTouch_();
-      if (body.offset) setProp_('TG_OFFSET', String(body.offset));
-      return json_({ ok: true });
-    }
-    if (action === 'relay-update') {         // 명령 한 건 전달
-      relayTouch_();
-      var relayResult = processUpdate_(body.update || null);
+    if (action === 'relay-ping' || action === 'relay-update' || action === 'relay-bye') {
+      if (!relayOwner_(body)) return json_({ ok: false, error: 'stale relay' });   // 지난 대기조의 신호
+      if (action === 'relay-bye') {                 // 종료 — 즉시 1분 방식으로 복귀
+        if (body.offset) setProp_('TG_OFFSET', String(body.offset));
+        relayStop_();
+        return json_({ ok: true });
+      }
+      relayTouch_();                                 // 살아 있다는 신호
+      var relayResult = null;
+      if (action === 'relay-update') relayResult = processUpdate_(body.update || null);
       if (body.offset) setProp_('TG_OFFSET', String(body.offset));
       return json_({ ok: true, result: relayResult });
-    }
-    if (action === 'relay-bye') {            // 대기조 종료 — 즉시 1분 방식으로 복귀
-      if (body.offset) setProp_('TG_OFFSET', String(body.offset));
-      relayStop_();
-      return json_({ ok: true });
     }
     if (action === 'fail') {
       clearWatchdog_();

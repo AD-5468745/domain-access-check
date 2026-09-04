@@ -823,13 +823,25 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
 }
 {
   const { env, B } = fresh(SEED);
-  const hello = relayApi(B, 'relay-hello', {});
+  const hello = relayApi(B, 'relay-hello', { relayId: 'R1' });
   t('대기조 시작 시 이어받을 지점을 알려줌', () => {
     assert.equal(hello.ok, true);
     assert.equal(hello.offset, 0);
     assert.equal(hello.idleMinutes, 10);
   });
-  t('두 번째 대기조는 스스로 물러남', () => assert.equal(relayApi(B, 'relay-hello', {}).alreadyAlive, true));
+  t('두 번째 대기조는 스스로 물러남', () => assert.equal(relayApi(B, 'relay-hello', { relayId: 'R2' }).alreadyAlive, true));
+  // ★ 2026-09-05 실측 사고: 첫 응답이 느려 대기조가 30초 만에 포기했는데 구글은 뒤늦게 실행 →
+  //   '살아있음'만 켜진 채 대기조는 없는 상태가 됐다. 같은 번호로 다시 인사하면 내 자리로 인정해야 한다.
+  t('같은 대기조가 다시 인사하면 자기 자리로 인정', () => {
+    const again = relayApi(B, 'relay-hello', { relayId: 'R1' });
+    assert.equal(again.alreadyAlive, undefined);
+    assert.equal(again.ok, true);
+  });
+  t('지난 대기조의 신호는 무시(수명 연장 방지)', () => {
+    const r = relayApi(B, 'relay-ping', { relayId: 'R2', offset: 999 });
+    assert.equal(r.ok, false);
+    assert.notEqual(env.props.get('TG_OFFSET'), '999');
+  });
 
   // 대기조가 살아 있으면 앱스스크립트 폴링은 텔레그램을 건드리지 않는다
   let polled = 0;
@@ -842,6 +854,7 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
 
   // 대기조가 명령을 넘기면 그대로 처리되고, 처리 지점이 기록된다
   const r = relayApi(B, 'relay-update', {
+    relayId: 'R1',
     update: { update_id: 501, channel_post: { chat: { id: -1001 }, message_id: 3, text: '목록' } },
     offset: 502,
   });
@@ -850,14 +863,14 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('처리 지점이 기록됨', () => assert.equal(env.props.get('TG_OFFSET'), '502'));
 
   // 대기조가 꺼지면 즉시 1분 방식으로 복귀한다
-  relayApi(B, 'relay-bye', { offset: 502 });
+  relayApi(B, 'relay-bye', { relayId: 'R1', offset: 502 });
   B.pollUpdates();
   t('대기조 종료 후 1분 폴링이 복귀', () => assert.equal(polled, 1));
 }
 {
   // 하트비트가 끊기면(대기조가 죽으면) 90초 뒤 자동으로 1분 방식이 돌아온다
   const { env, B } = fresh(SEED);
-  relayApi(B, 'relay-hello', {});
+  relayApi(B, 'relay-hello', { relayId: 'RX' });
   let polled = 0;
   env.tgReply = (method) => {
     if (method === 'getUpdates') { polled += 1; return { ok: true, result: [] }; }
@@ -1310,6 +1323,10 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   t('대기조는 브리지를 POST 로 부른다(한국 경유 GET 404 사고 재발 방지)', () => {
     assert.equal(/method: 'POST'/.test(RELAY_JS), true);
   });
+  // ★ 배포 직후 첫 응답 지연으로 대기조가 헛되이 물러나던 사고(2026-09-05) 재발 방지
+  t('대기조가 고유번호를 붙여 보낸다', () => assert.equal(/relayId: RELAY_ID/.test(RELAY_JS), true));
+  t('대기조가 첫 인사를 여러 번 시도한다', () => assert.equal(/attempt <= 3/.test(RELAY_JS), true));
+  t('브리지가 고유번호로 주인을 가린다', () => assert.equal(/function relayOwner_/.test(GS2), true));
 }
 
 // ═══════════════════════════════════════════════════════════
