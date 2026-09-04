@@ -541,6 +541,13 @@ const lastText = (env) => {
     postData: { contents: JSON.stringify({ rows, meta: { nowKst: '2026-08-28 21:00', summary: '총 1개 모두 정상 ✅', report: '리포트' } }) },
   }).text);
   t('write 성공', () => assert.equal(r.ok, true));
+  // ★ 결과 뒤에 조작 패널이 새 메시지로 따라와야 한다(버튼이 위로 밀려 안 보이는 문제)
+  t('결과 뒤에 관리 패널을 새 메시지로 발송', () => {
+    const sends = env.sent.filter((x) => x.method === 'sendMessage');
+    const last = sends[sends.length - 1];
+    assert.equal(/접속점검 관리/.test(last.body.text), true);
+    assert.equal(!!(last.body.reply_markup && last.body.reply_markup.inline_keyboard), true);
+  });
   const rBody = JSON.parse(B.doPost({
     parameter: {},
     postData: { contents: JSON.stringify({ token: 'tok', action: 'write', rows, meta: { nowKst: '2026-08-28 21:00', summary: '총 1개 모두 정상 ✅', report: '리포트' } }) },
