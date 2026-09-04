@@ -69,12 +69,52 @@ async function fetchJson(url, opts, timeoutMs) {
  *   대기조가 몇 분 만에 죽고 다시 1분 방식으로 떨어졌다(= 반응이 10~20초씩 걸린 진짜 원인).
  *   브리지는 같은 명령을 두 번 받아도 한 번만 처리하므로(seenUpdate_), 마음 놓고 다시 시도한다.
  */
+/**
+ * ★ 2026-09-05 실측으로 밝혀진 핵심 문제.
+ *
+ *   앱스스크립트 웹앱에 POST 하면 스크립트를 실행한 뒤 302(넘김)로 '답이 있는 임시 주소'를 알려준다.
+ *   Node 의 fetch 에게 알아서 따라가라고 맡겨두면(redirect:'follow') 두 가지 사고가 난다.
+ *     ① 임시 주소가 404 로 뜬다 → 대기조가 실패로 보고 죽는다
+ *     ② 넘김 주소가 다시 /exec 을 가리키면, 규칙상 POST 가 GET 으로 바뀌면서 본문(=잠금값)이
+ *        사라진 채 doGet 으로 들어가 {"ok":false,"error":"unauthorized"} 를 돌려준다.
+ *        대기조는 이걸 '브리지가 시작을 거절했다'로 오해하고 그대로 종료했다.
+ *
+ *   그래서 넘김을 fetch 에게 맡기지 않고 직접 판단한다.
+ *   답이 이상하면 '답이 아니다'라고 보고 다시 시도한다(브리지는 같은 명령을 두 번 받아도 한 번만 처리).
+ */
 async function bridgeOnce(action, payload, timeoutMs) {
-  return fetchJson(BRIDGE_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action, relayId: RELAY_ID }, payload || {})),
-  }, timeoutMs || 45000);
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs || 45000);
+  try {
+    const res = await fetch(BRIDGE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action, relayId: RELAY_ID }, payload || {})),
+      redirect: 'manual',
+      signal: ac.signal,
+    });
+
+    let body = null;
+    if (res.status >= 200 && res.status < 300) {
+      body = JSON.parse(await res.text());
+    } else if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location') || '';
+      if (!loc) throw new Error('넘김 주소가 없음');
+      if (loc.indexOf('/exec') !== -1) throw new Error('넘김이 제자리로 돌아옴(본문이 사라진다)');
+      const res2 = await fetch(loc, { redirect: 'follow', signal: ac.signal });
+      const text2 = await res2.text();
+      try { body = JSON.parse(text2); }
+      catch (e) { throw new Error('답이 JSON 이 아님 (HTTP ' + res2.status + ')'); }
+    } else {
+      throw new Error('HTTP ' + res.status);
+    }
+
+    // 잠금값은 분명히 맞다. 'unauthorized' 가 왔다면 본문이 중간에 사라진 것이다 → 답으로 인정하지 않는다.
+    if (body && body.ok === false && /unauthorized/i.test(String(body.error || ''))) {
+      throw new Error('본문이 중간에 사라짐(재시도 대상)');
+    }
+    return body;
+  } finally { clearTimeout(timer); }
 }
 
 /**

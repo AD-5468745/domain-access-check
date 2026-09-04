@@ -1392,6 +1392,19 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
     assert.equal(/redirect: 'manual'/.test(RELAY_JS), true);
     assert.equal(/res\.status >= 200 && res\.status < 400/.test(RELAY_JS), true);
   });
+  // ★ 2026-09-05 실측: 넘김(302)을 fetch 에게 맡기면 본문이 사라진 채 doGet 으로 들어가
+  //   {"ok":false,"error":"unauthorized"} 가 돌아오고, 대기조가 이를 '거절'로 오해해 종료했다.
+  t('넘김을 직접 판단한다(fetch 에게 맡기지 않는다)', () => {
+    assert.equal(/redirect: 'manual'/.test(RELAY_JS), true);
+    assert.equal(/loc\.indexOf\('\/exec'\)/.test(RELAY_JS), true);
+  });
+  t("본문이 사라져 생긴 'unauthorized' 는 답으로 인정하지 않는다", () => {
+    assert.equal(/unauthorized\/i\.test/.test(RELAY_JS), true);
+  });
+  t('브리지가 GET 에 잠금값을 요구한다(사라진 본문이 통과하지 못하게)', () => {
+    const at = GS2.indexOf('function doGet');
+    assert.equal(/authorized_\(e\)/.test(GS2.slice(at, at + 300)), true);
+  });
   t('대기조가 한 번 깨면 충분히 오래 살아 있다', () => {
     const idle = Number((RELAY_JS.match(/IDLE_MINUTES \|\| (\d+)/) || [])[1]);
     assert.equal(idle >= 20, true, `조용해지면 끄는 시간 ${idle}분은 너무 짧다`);
