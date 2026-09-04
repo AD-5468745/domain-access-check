@@ -1860,6 +1860,27 @@ function pinGuide() {
   Logger.log('안내문을 보내고 고정했습니다 → ' + ids[0]);
 }
 
+/**
+ * 성능 측정 — '어디가 느린가'를 추측 대신 숫자로 본다.
+ * 편집기에서 직접 실행하면 각 단계가 몇 ms 걸리는지 실행 로그에 찍힌다.
+ * (데이터를 바꾸지 않는 것만 잰다 — 백업/되돌리기 상태는 건드리지 않는다)
+ */
+function perfProbe() {
+  function ms(fn) { var t = Date.now(); try { fn(); } catch (e) {} return Date.now() - t; }
+  var tOpen  = ms(function () { SpreadsheetApp.getActive(); });
+  var tProp  = ms(function () { prop_('BOT_TOKEN'); });
+  var tCache = ms(function () { cache_().get('perf'); });
+  var tModel = ms(function () { loadModel_(); });
+  var tModel2 = ms(function () { loadModel_(); });
+  var tSet   = ms(function () { settings_(); });
+  var tMenu  = ms(function () { menuText_(); });
+  var tList  = ms(function () { listText_(); });
+  var tTg    = ms(function () { tgApi_('getMe', {}); });
+  var tSys   = ms(function () { sysWrite_(); });
+  Logger.log('시트열기 %s / 속성1회 %s / 캐시1회 %s / 모델읽기 %s / 모델재읽기 %s / 설정 %s / 패널만들기 %s / 목록만들기 %s / 텔레그램1회 %s / 시스템탭쓰기 %s  (단위 ms)',
+    tOpen, tProp, tCache, tModel, tModel2, tSet, tMenu, tList, tTg, tSys);
+}
+
 /** 시트가 제대로 읽히는지 확인 */
 function testRead() {
   var model = loadModel_();
