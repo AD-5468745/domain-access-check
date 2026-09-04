@@ -727,10 +727,9 @@ function menuText_() {
     '<blockquote>업체 ' + model.length + '곳 · 도메인 ' + totalDomains_(model) + '개',
     '점검 시각 ' + s.hours.map(function (h) { return ('0' + h).slice(-2) + '시'; }).join(' · ') +
       (s.paused ? '  ⏸ 일시중지' : '') ,
-    '마지막 점검 ' + esc_(prop_('LAST_RESULT_AT', '-')),
-    // ★ 이 줄은 '지금 등록 개수'가 아니라 '그때 점검 결과'다.
-    //   라벨이 없어서 도메인 7개인데 "등록된 도메인 없음"으로 읽히는 오해가 있었다(2026-09-05).
-    '└ 그때 결과 · ' + esc_(prop_('LAST_RESULT_SUMMARY', '아직 점검 기록이 없습니다')) + '</blockquote>',
+    // ★ '언제 점검했고 그 결과가 무엇이었나'를 한 줄로 붙여 쓴다.
+    //   두 줄로 나눠 놓으니 아랫줄이 '지금 등록 개수'로 읽히는 오해가 있었다(2026-09-05).
+    lastCheckLine_() + '</blockquote>',
     staleLine_(),
     '',
     speedLine_(),
@@ -746,6 +745,18 @@ function menuText_() {
  *   대기조가 자는 동안은 눌렸다는 사실 자체를 아무도 모르기 때문이다.
  *   그래서 누르기 '전에' 알 수 있게 패널에 상태를 적는다.
  */
+/**
+ * '언제 점검했고 결과가 무엇이었나'를 한 줄로.
+ * ★ 결과 요약은 점검기가 보내준 한 줄 성적표다(예: 총 7개 모두 정상 ✅).
+ *   시각과 떼어 놓으면 '지금 등록 개수'로 읽힌다 — 반드시 한 줄에 붙여 쓴다.
+ */
+function lastCheckLine_() {
+  var at = prop_('LAST_RESULT_AT', '');
+  if (!at) return '마지막 점검 아직 없음';
+  var sum = prop_('LAST_RESULT_SUMMARY', '');
+  return '마지막 점검 ' + esc_(at) + (sum ? ' → ' + esc_(sum) : '');
+}
+
 /**
  * 목록을 고친 뒤 아직 점검하지 않았으면 알려준다.
  * ★ 없으면 "도메인 7개"인데 "그때 결과 등록된 도메인 없음"이 나란히 보여 고장으로 읽힌다.

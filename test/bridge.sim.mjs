@@ -1514,15 +1514,25 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
 {
   const { env, B } = fresh(SEED);
   env.propStore.set('LAST_RESULT_AT', '2026-08-28 11:00');
-  env.propStore.set('LAST_RESULT_SUMMARY', '등록된 도메인 없음');
+  env.propStore.set('LAST_RESULT_SUMMARY', '총 7개 모두 정상 ✅');
   post(B, msg('메뉴'));
   const txt = lastText(env);
   t('지금 개수와 점검 결과가 구분되게 보인다', () => {
     assert.equal(/도메인 3개/.test(txt), true, '지금 등록 개수가 그대로 보여야 한다');
-    assert.equal(/그때 결과 · 등록된 도메인 없음/.test(txt), true);
+    // 시각과 결과를 한 줄로 붙여 써야 '지금 개수'로 오해되지 않는다
+    assert.equal(/마지막 점검 2026-08-28 11:00 → 총 7개 모두 정상 ✅/.test(txt), true);
   });
   t('목록을 고친 뒤 점검 안 했으면 알려준다', () =>
     assert.equal(/아직 점검하지 않았습니다/.test(txt), true));
+}
+{
+  // 점검 기록이 아예 없을 때
+  const { env, B } = fresh(SEED);
+  post(B, msg('메뉴'));
+  t('점검 기록이 없으면 그렇게만 쓴다', () => {
+    assert.equal(/마지막 점검 아직 없음/.test(lastText(env)), true);
+    assert.equal(/등록된 도메인 없음/.test(lastText(env)), false);
+  });
 }
 {
   const { env, B } = fresh(SEED);
@@ -1743,6 +1753,10 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   //   그 GET 이 한국 VPN 을 지나며 잘려 잠금값 없이 doGet 이 실행됐다.
   {
     const CHECK_JS = fs.readFileSync(new URL('../check.js', import.meta.url), 'utf8');
+    t("빈 시트 점검 결과가 '지금 개수'로 읽히지 않는 문구다", () => {
+      assert.equal(/summary: '등록된 도메인 없음'/.test(CHECK_JS), false);
+      assert.equal(/summary: '점검할 주소가 없어 건너뜀'/.test(CHECK_JS), true);
+    });
     t('점검도 넘김을 자동으로 따라가지 않는다(본문이 사라지는 길)', () => {
       assert.equal(/redirect: 'manual'/.test(CHECK_JS), true);
       assert.equal(/loc\.includes\('\/exec'\)/.test(CHECK_JS), true);

@@ -257,7 +257,7 @@ async function main() {
 
   if (domains.length === 0) {
     await sendTelegram(`🌐 접속점검\n🕒 ${nowKst} KST\n등록된 도메인이 없습니다. 채널에서 [➕ 도메인 추가]로 넣어주세요.`);
-    await writeResults([], nowKst, { nowKst, round, summary: '등록된 도메인 없음' }).catch(() => {});
+    await writeResults([], nowKst, { nowKst, round, summary: '점검할 주소가 없어 건너뜀' }).catch(() => {});
     return;
   }
 
