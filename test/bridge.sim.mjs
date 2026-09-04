@@ -1408,6 +1408,22 @@ const relayApi = (B, action, body) => JSON.parse(B.doPost({
   // ★ 배포 직후 첫 응답 지연으로 대기조가 헛되이 물러나던 사고(2026-09-05) 재발 방지
   t('대기조가 고유번호를 붙여 보낸다', () => assert.equal(/relayId: RELAY_ID/.test(RELAY_JS), true));
   t('대기조가 첫 인사를 여러 번 시도한다', () => assert.equal(/attempt <= 3/.test(RELAY_JS), true));
+  // ★ 2026-09-05 실측 사고: 브리지가 이따금 HTTP 404 를 돌려주는데(302 임시주소 문제),
+  //   그걸 실패로 보고 대기조를 통째로 종료해 몇 분 만에 죽었다 → 반응이 10~20초로 되돌아갔다.
+  t('브리지 호출은 한 번 삐끗해도 다시 시도한다', () => {
+    assert.equal(/BRIDGE_TRIES\s*=\s*[2-9]/.test(RELAY_JS), true);
+    assert.equal(/for \(var i = 1; i <= BRIDGE_TRIES/.test(RELAY_JS), true);
+  });
+  t('하트비트 한 번 실패로 대기조가 죽지 않는다', () => {
+    assert.equal(/pingFails \+= 1/.test(RELAY_JS), true);
+    assert.equal(/pingFails >= PING_FAIL_LIMIT/.test(RELAY_JS), true);
+  });
+  t("'살아있음' 표시가 하트비트 주기보다 충분히 길되 너무 길지 않다", () => {
+    const alive = Number((GS2.match(/RELAY_ALIVE_MS\s*=\s*(\d+)/) || [])[1]);
+    const poll = Number((RELAY_JS.match(/LONG_POLL_S\s*=\s*(\d+)/) || [])[1]) * 1000;
+    assert.equal(alive > poll * 2, true, `${alive}ms 는 하트비트 주기 ${poll}ms 에 비해 너무 짧다`);
+    assert.equal(alive <= 60000, true, `${alive}ms 는 너무 길다 — 죽은 뒤 공백이 길어진다`);
+  });
   t('브리지가 고유번호로 주인을 가린다', () => assert.equal(/function relayOwner_/.test(GS2), true));
   // ★ 반응 속도 — 설정값을 요청마다 통째로 한 번만 읽는다(2026-09-05)
   t('새 요청마다 설정값 기억을 비운다', () => {

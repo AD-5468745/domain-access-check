@@ -27,7 +27,9 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '';
 
 const IDLE_MS = Math.max(1, Number(process.env.IDLE_MINUTES || 10)) * 60 * 1000;
 const HARD_STOP_MS = 16 * 60 * 1000;   // 워크플로 제한(20분)보다 넉넉히 먼저 스스로 끝낸다
-const LONG_POLL_S = 25;                // 텔레그램에 '새 명령 생길 때까지' 귀 대고 있는 시간
+const LONG_POLL_S = 20;                // 텔레그램에 '새 명령 생길 때까지' 귀 대고 있는 시간
+const BRIDGE_TRIES = 3;                // 브리지 한 번 호출에 허용하는 재시도 횟수
+const PING_FAIL_LIMIT = 5;             // 하트비트가 이만큼 연달아 실패하면 물러난다
 const ALLOWED = ['message', 'channel_post', 'callback_query'];
 
 // ★ 이 대기조의 고유번호.
@@ -55,13 +57,34 @@ async function fetchJson(url, opts, timeoutMs) {
   } finally { clearTimeout(timer); }
 }
 
-/** 구글 앱스스크립트 브리지 호출 — 반드시 POST(한국 경유 GET 이 막히는 사례가 있었다) */
-function bridge(action, payload, timeoutMs) {
+/**
+ * 구글 앱스스크립트 브리지 호출 — 반드시 POST(한국 경유 GET 이 막히는 사례가 있었다).
+ *
+ * ★ 2026-09-05 실측: 이 호출이 이따금 HTTP 404 를 돌려준다.
+ *   앱스스크립트 웹앱은 POST 를 받으면 302로 다른 주소를 가리키고 본문은 거기서 내주는데,
+ *   그 임시 주소가 가끔 404 로 뜬다. 중요한 건 '스크립트는 이미 실행됐다'는 점이다.
+ *   예전 코드는 이걸 실패로 보고 대기조를 통째로 종료해 버렸고, 그래서
+ *   대기조가 몇 분 만에 죽고 다시 1분 방식으로 떨어졌다(= 반응이 10~20초씩 걸린 진짜 원인).
+ *   브리지는 같은 명령을 두 번 받아도 한 번만 처리하므로(seenUpdate_), 마음 놓고 다시 시도한다.
+ */
+async function bridgeOnce(action, payload, timeoutMs) {
   return fetchJson(BRIDGE_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(Object.assign({ token: BRIDGE_TOKEN, action, relayId: RELAY_ID }, payload || {})),
   }, timeoutMs || 45000);
+}
+
+async function bridge(action, payload, timeoutMs) {
+  var last = null;
+  for (var i = 1; i <= BRIDGE_TRIES; i++) {
+    try { return await bridgeOnce(action, payload, timeoutMs); }
+    catch (e) {
+      last = e;
+      if (i < BRIDGE_TRIES) await sleep(700 * i);
+    }
+  }
+  throw last || new Error('브리지 호출 실패');
 }
 
 /** 텔레그램에 길게 귀 대고 있기. 회복 불가능한 상황이면 null 을 돌려준다. */
@@ -86,7 +109,7 @@ async function main() {
     return;
   }
 
-  // 배포 직후 등에는 브리지 첫 응답이 느릴 수 있다 → 같은 고유번호로 최대 3번 인사한다.
+  // 배포 직후 등에는 브리지 첫 응답이 느릴 수 있다 → 같은 고유번호로 여러 번 인사한다.
   let hello = null;
   for (let attempt = 1; attempt <= 3 && !hello; attempt++) {
     try { hello = await bridge('relay-hello', {}, 45000); }
@@ -102,7 +125,7 @@ async function main() {
   let offset = Number(hello.offset || 0) || 0;
   let lastActivity = Date.now();
   const started = Date.now();
-  let forwarded = 0, failures = 0;
+  let forwarded = 0, failures = 0, pingFails = 0;
 
   console.log('대기조 시작 — 조용하면 ' + Math.round(IDLE_MS / 60000) + '분 뒤 자동 종료');
 
@@ -124,8 +147,14 @@ async function main() {
 
     if (!list.length) {
       let beat = null;
-      try { beat = await bridge('relay-ping', { offset }); }
-      catch (e) { console.log('하트비트 실패 — 1분 방식에 넘기고 종료합니다: ' + safeMsg(e)); break; }
+      try { beat = await bridge('relay-ping', { offset }); pingFails = 0; }
+      catch (e) {
+        // ★ 한 번 삐끗했다고 물러나지 않는다. 응답을 못 받았을 뿐 신호는 닿았을 수 있다.
+        pingFails += 1;
+        console.log('하트비트 실패 ' + pingFails + '회 — 계속 대기합니다: ' + safeMsg(e));
+        if (pingFails >= PING_FAIL_LIMIT) { console.log('하트비트가 계속 실패 — 1분 방식에 넘기고 종료합니다.'); break; }
+        continue;
+      }
       // 브리지가 '지난 대기조'로 판정하면 새 대기조가 자리를 넘겨받은 것이다 — 조용히 비켜준다.
       if (beat && beat.ok === false) { console.log('다른 대기조에게 자리를 넘기고 종료합니다.'); return; }
       continue;
@@ -134,13 +163,10 @@ async function main() {
     let broke = false;
     for (const u of list) {
       let ok = false;
-      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-        try {
-          const r = await bridge('relay-update', { update: u, offset: u.update_id + 1 });
-          ok = !!(r && r.ok);
-        } catch (e) { ok = false; }
-        if (!ok) await sleep(1000);
-      }
+      try {
+        const r = await bridge('relay-update', { update: u, offset: u.update_id + 1 });
+        ok = !!(r && r.ok);
+      } catch (e) { ok = false; }
       if (!ok) {
         // ★ 여기서 offset 을 올리면 그 명령은 영영 사라진다.
         //   올리지 않고 물러나면 1분 방식이 같은 자리에서 다시 가져간다.
