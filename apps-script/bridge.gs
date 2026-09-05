@@ -539,6 +539,7 @@ function sysWrite_(extra) {
       ['마지막 점검 요청', prop_('LAST_DISPATCH_AT', '-')],
       ['마지막 결과 도착', prop_('LAST_RESULT_AT', '-')],
       ['마지막 결과 요약', prop_('LAST_RESULT_SUMMARY', '-')],
+      ['수용량 측정', prop_('CAPACITY_RESULT', '-')],
       ['실행 상태', prop_('RUN_STATE', '대기')],
       ['마지막 오류', prop_('LAST_ERROR', '-')],
       ['GitHub 토큰 만료일', prop_('GITHUB_TOKEN_EXPIRES', '(미입력)')],
@@ -1117,6 +1118,7 @@ function runPendingSetup_() {
     else if (want === 'all') setupAll();
     else if (want === 'commands') setupCommands();
     else if (want === 'pin') pinGuide();
+    else if (want === 'perf') capacityProbe();
     else throw new Error('모르는 값: ' + want);
     setProp_('PENDING_SETUP_RESULT', nowKst_() + ' · ' + want + ' 실행 완료');
   } catch (e) {
@@ -1125,31 +1127,65 @@ function runPendingSetup_() {
 }
 
 /** 매시간 실행 — 설정된 시각이면 점검 요청 */
+/**
+ * 예정된 점검 시각이 되었는지 보고, 되었으면 점검을 시작한다.
+ *
+ * ★ 왜 1분마다 도는 곳에서 하나 (2026-09-05 실측)
+ *   예전에는 '매시간' 트리거가 이 판단을 했다. 그런데 앱스스크립트의 '매시간'은 정각이 아니라
+ *   구글이 그 시간대 안에서 고른 아무 분이다 — 실측으로 :42:46 이었다.
+ *   그래서 09시 점검이 09:42:46 에 시작해 결과가 09:45 에 왔다(43분 지연).
+ *   1분마다 도는 pollUpdates 가 이 판단을 하면 정각 ±1분에 시작한다.
+ *
+ * ★ 두 번 돌지 않게: 회차 열쇠(LAST_AUTO_KEY) + 자물쇠. 매시간 트리거도 이 함수를 부르지만
+ *   같은 회차는 한 번만 나간다(트리거가 죽어도 점검이 멈추지 않게 남겨 둔 이중 안전장치).
+ * ★ 최근 3시간 안에 놓친 회차가 있으면 지금 챙긴다(스크립트가 잠깐 멈춰도 건너뛰지 않게).
+ */
+function autoCheckTick_() {
+  var s = settings_();
+  if (s.paused || !s.hours.length) return;
+
+  var due = '';
+  for (var back = 0; back < 3; back++) {
+    var t = new Date(Date.now() - back * 3600000);
+    var hh = Number(Utilities.formatDate(t, 'Asia/Seoul', 'H'));
+    if (s.hours.indexOf(hh) === -1) continue;
+    var k = Utilities.formatDate(t, 'Asia/Seoul', 'yyyyMMddHH');
+    if (prop_('LAST_AUTO_KEY', '') === k) break;   // 이미 돌린 회차 → 그 이전은 볼 필요 없음
+    due = k;
+    break;
+  }
+  if (!due) return;
+
+  // 두 실행이 겹쳐 같은 회차를 두 번 시작하지 않게 잠근다
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return;
+  try {
+    PROP_MEMO = null;                              // 기다리는 동안 다른 실행이 이미 돌렸을 수 있다
+    if (prop_('LAST_AUTO_KEY', '') === due) return;
+    // ★ 먼저 열쇠를 남긴다 — 실패해도 1분마다 다시 시도해 알림이 쏟아지지 않게
+    setProp_('LAST_AUTO_KEY', due);
+    try {
+      dispatchWorkflow_('auto');
+    } catch (e) {
+      setProp_('LAST_ERROR', nowKst_() + ' 자동 점검 시작 실패: ' + String(e && e.message || e));
+      sysWrite_();
+      notifyChannel_('⚠️ 자동 점검을 시작하지 못했습니다.\n\n<blockquote>' + esc_(String(e && e.message || e)) + '</blockquote>');
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (ignoreUnlock) {}
+  }
+}
+
 function hourlyTick() {
   PROP_MEMO = null;
   try { runPendingSetup_(); } catch (ignoreSetup2) {}
   try {
     checkTokenExpiry_();
     try { preheatRelay_(); } catch (ignorePre2) {}
-    var s = settings_();
-    if (s.paused) return;
-    // ★ 매시간 트리거는 정각에 딱 맞춰 오지 않는다(08:56, 10:02 처럼 어긋난다).
-    //   '지금 시각이 목록에 있나'만 보면 09시 점검이 통째로 건너뛰어진다.
-    //   그래서 최근 3시간 안에 지나간 예정 시각 중 아직 안 돌린 게 있으면 지금 돌린다.
-    var due = '';
-    for (var back = 0; back < 3; back++) {
-      var t = new Date(Date.now() - back * 3600000);
-      var hh = Number(Utilities.formatDate(t, 'Asia/Seoul', 'H'));
-      if (s.hours.indexOf(hh) === -1) continue;
-      var k = Utilities.formatDate(t, 'Asia/Seoul', 'yyyyMMddHH');
-      if (prop_('LAST_AUTO_KEY', '') === k) break;    // 이미 돌린 회차 → 그 이전은 볼 필요 없음
-      due = k;
-      break;
-    }
-    if (!due) return;
-    setProp_('LAST_AUTO_KEY', due);
-
-    dispatchWorkflow_('auto');
+    // ★ 점검 시각 판단은 autoCheckTick_ 한 곳에서만 한다(위 주석 참고).
+    //   여기서도 부르는 건 1분 트리거가 죽었을 때를 대비한 이중 안전장치다 —
+    //   회차 열쇠와 자물쇠가 있어 두 번 나가지 않는다.
+    autoCheckTick_();
   } catch (e) {
     setProp_('LAST_ERROR', nowKst_() + ' ' + String(e && e.message || e));
     sysWrite_();
@@ -2406,6 +2442,11 @@ function pollUpdates() {
   // ★ 예약해 둔 조작 패널 보내기 — 웹훅 모드에서도 반드시 먼저 확인한다.
   try { panelTick_(); } catch (ignorePanel) {}
 
+  // ★ 점검 시각 확인 — 이것이 '정각에 점검이 도는' 이유다.
+  //   반드시 아래 '웹훅 모드면 return' 보다 위에 있어야 한다. 아래로 내리면
+  //   즉답기 모드에서 자동 점검이 통째로 멈춘다.
+  try { autoCheckTick_(); } catch (ignoreAuto) {}
+
   // ★ 즉답기(웹훅) 모드면 여기서 아무것도 하지 않는다.
   //   특히 아래 409 자동복구가 '우리 웹훅'을 지워버리는 사고를 막는다.
   if (mode_() === 'webhook') return;
@@ -2861,6 +2902,58 @@ function pinGuide() {
  * 편집기에서 직접 실행하면 각 단계가 몇 ms 걸리는지 실행 로그에 찍힌다.
  * (데이터를 바꾸지 않는 것만 잰다 — 백업/되돌리기 상태는 건드리지 않는다)
  */
+/**
+ * 수용량 측정 — '도메인이 몇 개까지 괜찮은가'를 추측이 아니라 재서 답하기 위한 것.
+ * ★ 실제 '접속점검'·'결과' 탭은 건드리지 않는다. 임시 탭에 쓰고 지운다.
+ *   결과는 스크립트 속성 CAPACITY_RESULT 에 남는다(설정 화면에서 바로 읽을 수 있게).
+ */
+function capacityProbe() {
+  function ms(fn) { var t = Date.now(); try { fn(); } catch (e) {} return Date.now() - t; }
+  var TMP = '_성능측정';
+  var lines = [];
+  var model = loadModel_();
+  lines.push('지금 등록: 업체 ' + model.length + '곳 · 도메인 ' + totalDomains_(model) + '개');
+
+  lines.push('모델읽기(캐시없음) ' + ms(function () { invalidateModel_(); readModel_(); }) + 'ms');
+  lines.push('모델읽기(캐시) ' + ms(function () { loadModel_(); }) + 'ms');
+  lines.push('설정읽기 ' + ms(function () { settings_(); }) + 'ms');
+  lines.push('시스템탭쓰기 ' + ms(function () { sysWrite_(); }) + 'ms');
+  lines.push('텔레그램1회 ' + ms(function () { tgApi_('getMe', {}); }) + 'ms');
+
+  // 결과 탭 쓰기 비용 — 도메인 수에 따라 얼마나 늘어나는지
+  var sh = null;
+  try {
+    var ss = ss_();
+    sh = ss.getSheetByName(TMP);
+    if (sh) ss.deleteSheet(sh);
+    sh = ss.insertSheet(TMP);
+    var sizes = [10, 100, 500, 1500];
+    for (var k = 0; k < sizes.length; k++) {
+      var n = sizes[k];
+      var rows = [];
+      for (var r = 0; r < n; r++) {
+        rows.push(['업체' + r, 'https://example-' + r + '.com/?code=NDTV', '✅ 정상', 200,
+                   'https://example-' + r + '.com/', 350, '2026-09-05 09:00', '정상']);
+      }
+      var t = ms(function () {
+        sh.clearContents();
+        sh.getRange(1, 1, rows.length, 8).setValues(rows);
+        SpreadsheetApp.flush();
+      });
+      lines.push('결과쓰기 ' + n + '행 ' + t + 'ms');
+    }
+  } catch (e) {
+    lines.push('결과쓰기 측정실패: ' + String(e && e.message || e).slice(0, 80));
+  } finally {
+    try { if (sh) ss_().deleteSheet(sh); } catch (ignore) {}
+  }
+
+  var out = nowKst_() + ' · ' + lines.join(' / ');
+  setProp_('CAPACITY_RESULT', out.slice(0, 900));
+  Logger.log(out);
+  return out;
+}
+
 function perfProbe() {
   function ms(fn) { var t = Date.now(); try { fn(); } catch (e) {} return Date.now() - t; }
   var tOpen  = ms(function () { SpreadsheetApp.getActive(); });

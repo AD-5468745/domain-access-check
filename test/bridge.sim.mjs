@@ -1718,6 +1718,117 @@ const AIDEN_URLS = [
 }
 
 // ═══════════════════════════════════════════════════════════
+// 12-6. 점검이 '정각'에 도는가 (2026-09-05 실측 사고)
+//   앱스스크립트의 '매시간'은 정각이 아니라 구글이 고른 아무 분이다(실측 :42:46).
+//   그래서 09시 점검이 09:42 에 시작해 43분 늦었다.
+//   → 판단을 1분마다 도는 pollUpdates 로 옮겼다. 정각 ±1분.
+// ═══════════════════════════════════════════════════════════
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');          // 지금 운영 방식
+  env.setNow('2026-08-28T08:59:00+09:00');
+  B.pollUpdates();
+  t('예정 시각 전에는 점검하지 않는다', () => assert.equal(checkRuns(env).length, 0));
+
+  env.setNow('2026-08-28T09:00:56+09:00');       // 1분 트리거가 실제로 도는 시각
+  B.pollUpdates();
+  t('★ 정각 직후 1분 안에 점검이 시작된다', () => assert.equal(checkRuns(env).length, 1));
+  t('자동 실행으로 표시된다', () => assert.equal(checkRuns(env)[0].body.inputs.mode, 'auto'));
+
+  for (let i = 1; i <= 5; i++) {                  // 그 시간대에 1분마다 계속 돌아도
+    env.setNow(`2026-08-28T09:0${i}:56+09:00`);
+    B.pollUpdates();
+  }
+  t('★ 같은 회차를 두 번 시작하지 않는다', () => assert.equal(checkRuns(env).length, 1));
+
+  env.setNow('2026-08-28T14:00:56+09:00');
+  B.pollUpdates();
+  t('예정에 없는 시각엔 안 돈다', () => assert.equal(checkRuns(env).length, 1));
+
+  env.setNow('2026-08-28T21:00:56+09:00');
+  B.pollUpdates();
+  t('다음 예정 시각에 다시 돈다', () => assert.equal(checkRuns(env).length, 2));
+}
+{
+  // ★ 가장 위험한 함정 — 즉답기(웹훅) 모드에서 pollUpdates 는 위에서 빠져나간다.
+  //   점검 판단이 그 아래로 내려가면 자동 점검이 통째로 멈춘다.
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  env.setNow('2026-08-28T09:00:56+09:00');
+  B.pollUpdates();
+  t('★ 즉답기 모드에서도 자동 점검이 돈다', () => assert.equal(checkRuns(env).length, 1));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'poll');
+  env.setNow('2026-08-28T09:00:56+09:00');
+  B.pollUpdates();
+  t('폴링 모드에서도 자동 점검이 돈다', () => assert.equal(checkRuns(env).length, 1));
+}
+{
+  // 1분 트리거가 죽어도 매시간 트리거가 챙긴다(이중 안전장치)
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  env.setNow('2026-08-28T09:42:46+09:00');
+  B.hourlyTick();
+  t('매시간 트리거도 여전히 챙긴다', () => assert.equal(checkRuns(env).length, 1));
+  B.pollUpdates();
+  t('그 뒤 1분 트리거가 또 돌리지 않는다', () => assert.equal(checkRuns(env).length, 1));
+}
+{
+  // 놓친 회차 보정 — 스크립트가 멈췄다 돌아와도 건너뛰지 않는다
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  env.setNow('2026-08-28T11:30:00+09:00');       // 09시를 놓친 채 2시간 반 뒤
+  B.pollUpdates();
+  t('놓친 회차를 챙긴다(최근 3시간)', () => assert.equal(checkRuns(env).length, 1));
+}
+{
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  env.propStore.set('PAUSED', 'yes');
+  env.setNow('2026-08-28T09:00:56+09:00');
+  B.pollUpdates();
+  t('일시중지 중엔 정각이어도 안 돈다', () => assert.equal(checkRuns(env).length, 0));
+}
+{
+  // 점검 시각을 바꾸면 바로 그 시각에 돈다
+  const { env, B } = fresh(SEED);
+  env.propStore.set('MODE', 'webhook');
+  post(B, msg('점검시각 7 13 19 1'));
+  env.setNow('2026-08-28T13:00:56+09:00');
+  B.pollUpdates();
+  t('바꾼 시각(13시)에 돈다', () => assert.equal(checkRuns(env).length, 1));
+  // 21시엔 '놓친 19시'를 챙기느라 도는 게 맞다(3시간 보정) — 그래서 22시로 확인한다
+  env.setNow('2026-08-28T21:00:56+09:00');
+  B.pollUpdates();
+  t('놓친 19시를 21시에 챙긴다', () => assert.equal(checkRuns(env).length, 2));
+  env.setNow('2026-08-28T22:00:56+09:00');
+  B.pollUpdates();
+  t('예정에 없는 22시엔 안 돈다', () => assert.equal(checkRuns(env).length, 2));
+}
+{
+  // 코드 배치 가드 — 판단이 '웹훅 return' 아래로 내려가면 즉시 실패한다
+  const GS3 = fs.readFileSync(new URL('../apps-script/bridge.gs', import.meta.url), 'utf8');
+  const at = GS3.indexOf('function pollUpdates');
+  const body = GS3.slice(at, at + 1600);
+  t('★ 점검 판단이 웹훅 return 보다 위에 있다', () => {
+    const auto = body.indexOf('autoCheckTick_()');
+    const ret = body.indexOf("mode_() === 'webhook'");
+    assert.equal(auto !== -1 && ret !== -1 && auto < ret, true,
+      '자동 점검 판단이 웹훅 조기 return 아래로 내려갔다 — 자동 점검이 멈춘다');
+  });
+  t('점검 판단은 자물쇠로 겹침을 막는다', () => {
+    const a2 = GS3.indexOf('function autoCheckTick_');
+    assert.equal(/tryLock/.test(GS3.slice(a2, a2 + 1400)), true);
+  });
+  t('트리거를 새로 만들지 않는다(구글이 분을 다시 고르는 것 방지)', () => {
+    assert.equal((GS3.match(/newTrigger\('hourlyTick'\)/g) || []).length, 1);
+    assert.equal((GS3.match(/newTrigger\('pollUpdates'\)/g) || []).length, 1);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
 // 13. 문서 ↔ 코드 대조 — 설명서에 적힌 대로 실제로 동작하는가
 //     (문서와 코드가 어긋나면 비개발자는 그 자리에서 막힌다)
 // ═══════════════════════════════════════════════════════════
