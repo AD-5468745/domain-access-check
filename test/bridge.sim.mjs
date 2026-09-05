@@ -2061,12 +2061,12 @@ const AIDEN_URLS = [
       assert.equal(/SHEET_BRIDGE_TOKEN 과 앱스스크립트 ACCESS_TOKEN/.test(CHECK_JS), true);
     });
   }
-  // ★ 에이든 지시(2026-09-05) — '잠시만요!' 팝업 문구는 즉답기·대기조가 같아야 한다
-  t("즉답 팝업 문구가 '⏳ 잠시만요!' 로 같다", () => {
+  // ★ 에이든 지시(2026-09-05) — 팝업 문구는 즉답기·대기조가 같아야 한다(느낌표 없음으로 확정)
+  t("즉답 팝업 문구가 '⏳ 잠시만요' 로 같다", () => {
     const w = (WORKER_JS.match(/text: '([^']*잠시만요[^']*)'/) || [])[1];
     const r = (RELAY_JS.match(/text: '([^']*잠시만요[^']*)'/) || [])[1];
-    assert.equal(w, '⏳ 잠시만요!');
-    assert.equal(r, '⏳ 잠시만요!');
+    assert.equal(w, '⏳ 잠시만요');
+    assert.equal(r, '⏳ 잠시만요');
   });
   // ★ 설치 함수는 편집기 선택 상자를 못 믿어 속성으로 실행한다 — 문서와 코드가 같은 값이어야 한다
   t('설명서의 PENDING_SETUP 값이 코드에 다 있다', () => {
