@@ -1061,6 +1061,13 @@ const edge = (B, update, preAnswered) => JSON.parse(B.doPost({
   post(B, msg('/menu'));
   t("'/menu' 로도 나온다", () => assert.equal(/접속점검 관리/.test(lastText(env)), true));
   t('패널에 다시 부르는 법이 적혀 있다', () => assert.equal(/ㅁ/.test(lastText(env)), true));
+  // ★ 에이든 지시(2026-09-06) — 한글주소가 다른 주소로 넘어가는 건 정상이라는 안내를 패널에 둔다.
+  t('패널에 한글주소 안내가 있다', () => {
+    const text = lastText(env);
+    assert.equal(/한글주소/.test(text), true, '한글주소 안내 줄이 사라졌다');
+    assert.equal(/짱구\.com/.test(text), true, '예시가 있어야 담당자가 바로 이해한다');
+    assert.equal(/막힌 경우만/.test(text), true, '무엇만 알리는지가 빠지면 안내가 아니다');
+  });
 }
 {
   const { env, B } = fresh(SEED);

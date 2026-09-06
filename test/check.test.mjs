@@ -5,7 +5,7 @@ import {
   buildSheetRows, buildTelegramReport, countByStatus, groupProblems,
   statusCell, escapeHtml, SHEET_HEADER,
 } from '../lib/core.js';
-import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked, looksKoreaBlocked } from '../lib/probe.js';
+import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked, looksKoreaBlocked, isIdnHost, asciiHost } from '../lib/probe.js';
 import { recheckBlocked, recheckOne } from '../lib/browser.js';
 import { splitForTelegram } from '../check.js';
 
@@ -431,6 +431,62 @@ t('다른 주소로 넘어가면 주소확인', async () => {
   assert.equal(r.status, 'redir');
 });
 
+// ── 2-3b. 한글주소(국제화 도메인) ────────────────────────────
+//   ★ 2026-09-06 에이든 지시: 한글주소는 실제 주소로 넘어가는 것이 정상 동작이다.
+//     접속이 막힌 경우(차단·제한)만 문제로 알리고, 나머지는 전부 정상으로 본다.
+const KO = '짱구.com';
+const KO_PUNY = new URL('https://' + KO).hostname;              // xn--… (노드가 계산)
+
+t('한글주소를 알아본다', () => {
+  assert.equal(isIdnHost(KO), true);
+  assert.equal(isIdnHost(KO_PUNY), true, '퓨니코드로 적어도 한글주소다');
+  assert.equal(isIdnHost('example.com'), false);
+  assert.equal(isIdnHost(''), false);
+});
+t('비교용 주소는 퓨니코드로 맞춘다', () => {
+  assert.equal(asciiHost(KO), KO_PUNY);
+  assert.equal(asciiHost('WWW.Example.COM'), 'example.com');
+  assert.equal(asciiHost(''), '');
+});
+await ta('한글주소가 자기 자신으로 열리면 정상 (넘어감 표시 없음)', async () => {
+  const r = await checkOne({ company: 'A', domain: KO, host: KO },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://' + KO_PUNY + '/') });
+  assert.equal(r.status, 'up');
+  assert.equal(r.redirectTo, '', '같은 주소인데 넘어갔다고 하면 안 된다');
+});
+await ta('한글주소가 다른 주소로 넘어가도 정상', async () => {
+  const r = await checkOne({ company: 'A', domain: KO, host: KO },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://real-site.com/') });
+  assert.equal(r.status, 'up');
+  assert.equal(r.note, '정상(한글주소 연결)');
+  assert.equal(r.redirectTo, 'real-site.com', '어디로 갔는지는 시트에 남긴다');
+});
+await ta('퓨니코드로 적은 한글주소도 같은 규칙', async () => {
+  const r = await checkOne({ company: 'A', domain: KO_PUNY, host: KO_PUNY },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://real-site.com/') });
+  assert.equal(r.status, 'up');
+});
+await ta('한글주소가 심의차단이면 이상 그대로', async () => {
+  const r = await checkOne({ company: 'A', domain: KO, host: KO },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://www.warning.or.kr/') });
+  assert.equal(r.status, 'down');
+});
+await ta('한글주소가 제한(403)이면 제한 그대로', async () => {
+  const r = await checkOne({ company: 'A', domain: KO, host: KO },
+    { retries: 0, fetchImpl: async () => ({ status: 403, url: 'https://' + KO_PUNY + '/', headers: { get: () => '' }, text: async () => '' }) });
+  assert.equal(r.status, 'warn');
+});
+await ta('한글주소가 아예 안 열리면 이상 그대로', async () => {
+  const r = await checkOne({ company: 'A', domain: KO, host: KO },
+    { retries: 0, fetchImpl: async () => { const e = new Error('fetch failed'); e.cause = { code: 'ENOTFOUND' }; throw e; } });
+  assert.equal(r.status, 'down');
+});
+await ta('영문주소는 그대로 주소확인 (회귀)', async () => {
+  const r = await checkOne({ company: 'A', domain: 'a.com', host: 'a.com' },
+    { retries: 0, fetchImpl: async () => mkRes(200, 'https://other.com/') });
+  assert.equal(r.status, 'redir', '한글주소 규칙이 영문주소까지 번지면 안 된다');
+});
+
 // ── 2-4. 방화벽(봇차단) 가려내기 ────────────────────────────
 //   2026-09-05 실측: 제휴 사이트가 Cloudflare 로 403 'Attention Required!' 를 돌려준다.
 //   이걸 '제한'으로 찍으면 멀쩡한 사이트 전부가 거짓 경보가 된다.
@@ -562,6 +618,12 @@ t('브라우저에서 다른 주소로 넘어가면 주소확인', async () => {
   await recheckBlocked(results, { launchImpl: async () => fakeBrowser({ status: 200, url: 'https://other.com/' }) });
   assert.equal(results[0].status, 'redir');
   assert.equal(results[0].redirectTo, 'other.com');
+});
+await ta('브라우저에서도 한글주소는 넘어가도 정상', async () => {
+  const results = [{ company: 'A', domain: 'https://' + KO + '/', host: KO, status: 'blocked', note: '봇차단' }];
+  await recheckBlocked(results, { launchImpl: async () => fakeBrowser({ status: 200, url: 'https://real-site.com/' }) });
+  assert.equal(results[0].status, 'up');
+  assert.equal(results[0].redirectTo, 'real-site.com');
 });
 t('막힌 게 없으면 브라우저를 아예 켜지 않는다', async () => {
   let opened = false;
