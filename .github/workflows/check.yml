@@ -28,12 +28,12 @@ jobs:
 
     steps:
       - name: 코드 받기
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Node 20 준비
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
 
