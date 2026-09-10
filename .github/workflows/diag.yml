@@ -254,6 +254,36 @@ jobs:
           PROBE_TITLE: 'E. VPN 켜고 · 고친 코드 그대로 읽기'
         run: node tools/bridge-probe.mjs
 
+      - name: F. VPN 켜고 · 시트에서 직접 읽기 (새 길)
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_GID: '0'
+        run: |
+          set +e
+          ok=0; bad=0
+          for i in 1 2 3 4 5 6; do
+            OUT=$(node -e "
+              const { parseCsv, parseSheet } = await import('./lib/core.js');
+              const u='https://docs.google.com/spreadsheets/d/'+process.env.SHEET_ID+'/export?format=csv&gid='+process.env.SHEET_GID;
+              const t0=Date.now();
+              const r=await fetch(u,{redirect:'follow'});
+              const t=await r.text();
+              if(/^\\s*<(!doctype|html)/i.test(t)) { console.log('실패 로그인안내'); process.exit(0); }
+              const { domains, skipped } = parseSheet(parseCsv(t));
+              console.log(r.status+' '+domains.length+' '+skipped.length+' '+(Date.now()-t0));
+            " 2>&1 | tail -1)
+            case "$OUT" in
+              200\ *) ok=$((ok+1)); echo "  $i) 정상 · 도메인 $(echo $OUT|cut -d' ' -f2)개 · 건너뜀 $(echo $OUT|cut -d' ' -f3) · $(echo $OUT|cut -d' ' -f4)ms";;
+              *) bad=$((bad+1)); echo "  $i) 실패: $OUT";;
+            esac
+            sleep 2
+          done
+          echo "결과: 성공 $ok / 실패 $bad"
+          { echo "## F. VPN 켜고 · 시트에서 직접 읽기 (새 길)"; echo "- **성공 $ok / 실패 $bad** (6회)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 진단 요약을 한 번 더 (마지막 칸이 안 보이는 문제 대비)
+        run: echo "- (끝)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: 뒷정리
         if: always()
         run: |
