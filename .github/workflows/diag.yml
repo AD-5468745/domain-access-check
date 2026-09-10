@@ -43,6 +43,7 @@ jobs:
             sleep 2
           done
           echo "결과: 성공 $ok / 실패 $bad  (A. VPN 끄고 (깃허브 기본 IP))"
+          { echo "## A. VPN 끄고 (깃허브 기본 IP)"; echo "- 출구 국가: $(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')"; echo "- **성공 $ok / 실패 $bad** (8회 시도)"; echo; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: OpenVPN 설치
         run: |
@@ -186,6 +187,7 @@ jobs:
             sleep 2
           done
           echo "결과: 성공 $ok / 실패 $bad  (B. VPN 켜고 (한국 IP))"
+          { echo "## B. VPN 켜고 (한국 IP)"; echo "- 출구 국가: $(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')"; echo "- **성공 $ok / 실패 $bad** (8회 시도)"; echo; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 뒷정리
         if: always()
