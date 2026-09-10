@@ -1,8 +1,8 @@
 name: 진단 — 브리지 답 받아오기 (VPN 전/후 비교)
 
-# 2026-09-10 사고 조사용. 시트를 건드리지 않는다(일부러 틀린 잠금값 사용).
-# 텔레그램도 보내지 않는다. 오직 '앱스스크립트 답을 받아올 수 있는가'만 잰다.
-# 손으로만 돌린다.
+# 2026-09-10 사고 조사용. 손으로만 돌린다.
+# 시트를 바꾸지 않는다(read 만 한다). 텔레그램도 보내지 않는다.
+# ★ 답의 '내용'은 절대 찍지 않는다 — 공개 로그다. 크기(바이트)만 남긴다.
 on:
   workflow_dispatch:
 
@@ -13,37 +13,65 @@ jobs:
   diag:
     name: 브리지 전송 진단
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
-      - name: A. VPN 끄고 (깃허브 기본 IP)
+      - name: A. VPN 끄고 · 짧은 답
         env:
           SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          TOK: 
         run: |
           set +e
-          echo "── A. VPN 끄고 (깃허브 기본 IP) ──"
-          echo "출구 국가: $(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')"
+          echo "── A. VPN 끄고 · 짧은 답 ── (틀린 잠금값 — 짧은 답만 온다)"
+          C=$(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')
+          echo "출구 국가: $C"
           ok=0; bad=0
           for i in 1 2 3 4 5 6 7 8; do
-            # 일부러 틀린 잠금값을 쓴다 — 시트를 건드리지 않고 '길'만 시험한다.
             H=$(curl -s -o /dev/null -D - --max-time 60 -X POST "$SHEET_BRIDGE_URL" \
                  -H 'Content-Type: application/json' \
-                 -d '{"token":"진단용-틀린값","action":"read"}' | tr -d '\r')
+                 -d "{\"token\":\"$TOK\",\"action\":\"read\"}" | tr -d '\r')
             S1=$(echo "$H" | awk '/^HTTP\//{print $2}' | head -1)
             L=$(echo "$H" | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}')
-            if [ -z "$L" ]; then echo "  $i) POST=$S1 넘김없음"; bad=$((bad+1)); continue; fi
-            HOST=$(echo "$L" | sed -E 's#https?://([^/]+).*#\1#')
-            S2=$(curl -s -o /tmp/ans.txt -w '%{http_code}' --max-time 60 "$L")
-            BODY=$(head -c 40 /tmp/ans.txt | tr -d '\n')
-            echo "  $i) POST=$S1 → [$HOST] $S2  본문:$BODY"
-            case "$BODY" in *unauthorized*) ok=$((ok+1));; *) bad=$((bad+1));; esac
+            if [ -z "$L" ]; then echo "  $i) POST=$S1 넘김없음"; bad=$((bad+1)); sleep 2; continue; fi
+            S2=$(curl -s -o /tmp/ans.bin -w '%{http_code}' --max-time 60 "$L")
+            N=$(wc -c < /tmp/ans.bin | tr -d ' ')
+            # 내용은 절대 찍지 않는다 — 업체명·도메인이 공개 로그에 남으면 안 된다.
+            if [ "$S2" = "200" ] && [ "$N" -gt 20 ]; then ok=$((ok+1)); else bad=$((bad+1)); fi
+            echo "  $i) POST=$S1 → 답 $S2 · ${N}바이트"
             sleep 2
           done
-          echo "결과: 성공 $ok / 실패 $bad  (A. VPN 끄고 (깃허브 기본 IP))"
-          { echo "## A. VPN 끄고 (깃허브 기본 IP)"; echo "- 출구 국가: $(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')"; echo "- **성공 $ok / 실패 $bad** (8회 시도)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          echo "결과: 성공 $ok / 실패 $bad"
+          { echo "## A. VPN 끄고 · 짧은 답"; echo "- 출구 국가: $C"; echo "- **성공 $ok / 실패 $bad** (8회)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: B. VPN 끄고 · 진짜 읽기
+        env:
+          SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          TOK: ${{ secrets.SHEET_BRIDGE_TOKEN }}
+        run: |
+          set +e
+          echo "── B. VPN 끄고 · 진짜 읽기 ── (진짜 잠금값으로 실제 읽기(시트 내용을 통째로 실어 온다))"
+          C=$(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')
+          echo "출구 국가: $C"
+          ok=0; bad=0
+          for i in 1 2 3 4 5 6 7 8; do
+            H=$(curl -s -o /dev/null -D - --max-time 60 -X POST "$SHEET_BRIDGE_URL" \
+                 -H 'Content-Type: application/json' \
+                 -d "{\"token\":\"$TOK\",\"action\":\"read\"}" | tr -d '\r')
+            S1=$(echo "$H" | awk '/^HTTP\//{print $2}' | head -1)
+            L=$(echo "$H" | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}')
+            if [ -z "$L" ]; then echo "  $i) POST=$S1 넘김없음"; bad=$((bad+1)); sleep 2; continue; fi
+            S2=$(curl -s -o /tmp/ans.bin -w '%{http_code}' --max-time 60 "$L")
+            N=$(wc -c < /tmp/ans.bin | tr -d ' ')
+            # 내용은 절대 찍지 않는다 — 업체명·도메인이 공개 로그에 남으면 안 된다.
+            if [ "$S2" = "200" ] && [ "$N" -gt 20 ]; then ok=$((ok+1)); else bad=$((bad+1)); fi
+            echo "  $i) POST=$S1 → 답 $S2 · ${N}바이트"
+            sleep 2
+          done
+          echo "결과: 성공 $ok / 실패 $bad"
+          { echo "## B. VPN 끄고 · 진짜 읽기"; echo "- 출구 국가: $C"; echo "- **성공 $ok / 실패 $bad** (8회)"; echo; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: OpenVPN 설치
         run: |
@@ -163,34 +191,62 @@ jobs:
           sudo tail -n 20 /tmp/openvpn.log 2>/dev/null | sed -e 's/[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/x.x.x.x/g'
           exit 0
 
-      - name: B. VPN 켜고 (한국 IP)
+      - name: C. VPN 켜고 · 짧은 답
         env:
           SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          TOK: 
         run: |
           set +e
-          echo "── B. VPN 켜고 (한국 IP) ──"
-          echo "출구 국가: $(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')"
+          echo "── C. VPN 켜고 · 짧은 답 ── (틀린 잠금값 — 짧은 답만 온다)"
+          C=$(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')
+          echo "출구 국가: $C"
           ok=0; bad=0
           for i in 1 2 3 4 5 6 7 8; do
-            # 일부러 틀린 잠금값을 쓴다 — 시트를 건드리지 않고 '길'만 시험한다.
             H=$(curl -s -o /dev/null -D - --max-time 60 -X POST "$SHEET_BRIDGE_URL" \
                  -H 'Content-Type: application/json' \
-                 -d '{"token":"진단용-틀린값","action":"read"}' | tr -d '\r')
+                 -d "{\"token\":\"$TOK\",\"action\":\"read\"}" | tr -d '\r')
             S1=$(echo "$H" | awk '/^HTTP\//{print $2}' | head -1)
             L=$(echo "$H" | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}')
-            if [ -z "$L" ]; then echo "  $i) POST=$S1 넘김없음"; bad=$((bad+1)); continue; fi
-            HOST=$(echo "$L" | sed -E 's#https?://([^/]+).*#\1#')
-            S2=$(curl -s -o /tmp/ans.txt -w '%{http_code}' --max-time 60 "$L")
-            BODY=$(head -c 40 /tmp/ans.txt | tr -d '\n')
-            echo "  $i) POST=$S1 → [$HOST] $S2  본문:$BODY"
-            case "$BODY" in *unauthorized*) ok=$((ok+1));; *) bad=$((bad+1));; esac
+            if [ -z "$L" ]; then echo "  $i) POST=$S1 넘김없음"; bad=$((bad+1)); sleep 2; continue; fi
+            S2=$(curl -s -o /tmp/ans.bin -w '%{http_code}' --max-time 60 "$L")
+            N=$(wc -c < /tmp/ans.bin | tr -d ' ')
+            # 내용은 절대 찍지 않는다 — 업체명·도메인이 공개 로그에 남으면 안 된다.
+            if [ "$S2" = "200" ] && [ "$N" -gt 20 ]; then ok=$((ok+1)); else bad=$((bad+1)); fi
+            echo "  $i) POST=$S1 → 답 $S2 · ${N}바이트"
             sleep 2
           done
-          echo "결과: 성공 $ok / 실패 $bad  (B. VPN 켜고 (한국 IP))"
-          { echo "## B. VPN 켜고 (한국 IP)"; echo "- 출구 국가: $(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')"; echo "- **성공 $ok / 실패 $bad** (8회 시도)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+          echo "결과: 성공 $ok / 실패 $bad"
+          { echo "## C. VPN 켜고 · 짧은 답"; echo "- 출구 국가: $C"; echo "- **성공 $ok / 실패 $bad** (8회)"; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: D. VPN 켜고 · 진짜 읽기
+        env:
+          SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          TOK: ${{ secrets.SHEET_BRIDGE_TOKEN }}
+        run: |
+          set +e
+          echo "── D. VPN 켜고 · 진짜 읽기 ── (진짜 잠금값으로 실제 읽기(시트 내용을 통째로 실어 온다))"
+          C=$(curl -fsS --max-time 10 https://ipinfo.io/country | tr -d '[:space:]')
+          echo "출구 국가: $C"
+          ok=0; bad=0
+          for i in 1 2 3 4 5 6 7 8; do
+            H=$(curl -s -o /dev/null -D - --max-time 60 -X POST "$SHEET_BRIDGE_URL" \
+                 -H 'Content-Type: application/json' \
+                 -d "{\"token\":\"$TOK\",\"action\":\"read\"}" | tr -d '\r')
+            S1=$(echo "$H" | awk '/^HTTP\//{print $2}' | head -1)
+            L=$(echo "$H" | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}')
+            if [ -z "$L" ]; then echo "  $i) POST=$S1 넘김없음"; bad=$((bad+1)); sleep 2; continue; fi
+            S2=$(curl -s -o /tmp/ans.bin -w '%{http_code}' --max-time 60 "$L")
+            N=$(wc -c < /tmp/ans.bin | tr -d ' ')
+            # 내용은 절대 찍지 않는다 — 업체명·도메인이 공개 로그에 남으면 안 된다.
+            if [ "$S2" = "200" ] && [ "$N" -gt 20 ]; then ok=$((ok+1)); else bad=$((bad+1)); fi
+            echo "  $i) POST=$S1 → 답 $S2 · ${N}바이트"
+            sleep 2
+          done
+          echo "결과: 성공 $ok / 실패 $bad"
+          { echo "## D. VPN 켜고 · 진짜 읽기"; echo "- 출구 국가: $C"; echo "- **성공 $ok / 실패 $bad** (8회)"; echo; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 뒷정리
         if: always()
         run: |
           sudo pkill openvpn 2>/dev/null || true
-          rm -f /tmp/nordauth.txt || true
+          rm -f /tmp/nordauth.txt /tmp/ans.bin || true
