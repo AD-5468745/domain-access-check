@@ -7,7 +7,7 @@ import {
 } from '../lib/core.js';
 import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked, looksKoreaBlocked, isIdnHost, asciiHost } from '../lib/probe.js';
 import { recheckBlocked, recheckOne } from '../lib/browser.js';
-import { splitForTelegram } from '../check.js';
+import { splitForTelegram, bridgeFetch, BRIDGE_TRIES, BRIDGE_MAX_HOPS } from '../check.js';
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -762,6 +762,60 @@ await ta('다른 주소로 넘어간 뒤 403 이어도 이동을 알려준다', 
 await ta('같은 사이트로 넘어간 403 은 이동 표시 없음', async () => {
   const r = await checkOne({ company: 'A', domain: 'a.com' }, { fetchImpl: async () => ({ status: 403, url: 'https://www.a.com/' }) });
   assert.equal(r.redirectTo, '');
+});
+
+// ── 2-9. 브리지 답 받아오기 (2026-09-10 사고) ────────────────
+//   앱스스크립트는 답을 바로 주지 않고 '임시 답 주소'로 넘긴다.
+//   그 넘김을 자동으로 따라가면 POST 가 GET 으로 바뀌어 잠금값이 사라지고,
+//   /exec 로 되돌아가 doGet 이 'unauthorized' 를 돌려준다 — 가짜 진단의 원인.
+const R = (status, loc, ok) => ({
+  status, ok: ok !== undefined ? ok : (status >= 200 && status < 300),
+  headers: { get: (k) => (String(k).toLowerCase() === 'location' ? (loc || '') : '') },
+});
+
+await ta('넘김이 없으면 그대로 답이다', async () => {
+  const seen = [];
+  const res = await bridgeFetch('https://x/exec', { method: 'POST' }, 100,
+    async (u, o) => { seen.push([u, o.redirect]); return R(200); });
+  assert.equal(res.status, 200);
+  assert.deepEqual(seen, [['https://x/exec', 'manual']], '자동 따라가기를 쓰면 안 된다');
+});
+await ta('임시 답 주소로 넘기면 손으로 따라간다', async () => {
+  const seen = [];
+  const res = await bridgeFetch('https://x/exec', { method: 'POST' }, 100,
+    async (u, o) => { seen.push([u, o.redirect]); return u.includes('/exec') ? R(302, 'https://tmp/answer') : R(200); });
+  assert.equal(res.status, 200);
+  assert.equal(seen[1][0], 'https://tmp/answer');
+  assert.equal(seen[1][1], 'manual', '두 번째 걸음도 자동 따라가기를 쓰면 안 된다');
+});
+await ta('★ 임시 답 주소가 /exec 로 되돌리면 즉시 포기 (doGet 을 부르지 않는다)', async () => {
+  const seen = [];
+  await assert.rejects(
+    bridgeFetch('https://x/exec', { method: 'POST' }, 100, async (u, o) => {
+      seen.push(u);
+      if (u.includes('/exec') && seen.length === 1) return R(302, 'https://tmp/answer');
+      return R(302, 'https://x/exec?again=1');
+    }),
+    /제자리로 돌아옴/);
+  assert.equal(seen.length, 2, '되돌림을 따라가면 안 된다 — 여기서 멈춰야 한다');
+});
+await ta('첫 넘김이 바로 /exec 로 돌아와도 포기한다', async () => {
+  await assert.rejects(
+    bridgeFetch('https://x/exec', { method: 'POST' }, 100, async () => R(302, 'https://x/exec?a=1')),
+    /제자리로 돌아옴/);
+});
+await ta('넘김 주소가 비어 있으면 오류', async () => {
+  await assert.rejects(bridgeFetch('https://x/exec', {}, 100, async () => R(302, '')), /비어 있음/);
+});
+await ta('넘김이 끝없이 이어지면 멈춘다', async () => {
+  let n = 0;
+  await assert.rejects(
+    bridgeFetch('https://x/exec', {}, 100, async () => { n++; return R(302, 'https://tmp/' + n); }),
+    /계속 이어져/);
+  assert.equal(n, BRIDGE_MAX_HOPS + 1);
+});
+t('재시도 횟수가 3번보다 늘었다', () => {
+  assert.equal(BRIDGE_TRIES >= 5, true, '잠깐 지나가는 문제라 여유가 필요하다');
 });
 
 t('형식 오류 항목이 리포트에 표시된다', () => {

@@ -162,24 +162,48 @@ async function verifyKoreaIp() {
 //     ② 임시 답 주소를 직접 받아온다. 실패하면 처음부터 다시 POST 한다(최대 3번).
 //     ③ URL 에 잠금값을 붙이는 대체 경로는 없앴다 — 동작도 안 하고 비밀값이 URL 에 남는다.
 // ═══════════════════════════════════════════════════════════════════
-const BRIDGE_TRIES = 3;
+//
+// ★ 2026-09-10 두 번째 사고 — 실행 로그로 확인한 사실:
+//   앱스스크립트 쪽 doPost 는 매번 정상으로 끝났다(1~4초, 상태 '완료됨').
+//   그런데 답을 받아오는 쪽에서 404 · 60초 무응답 · 되돌림이 번갈아 났다.
+//   되돌림이 나면 예전 코드는 그 넘김을 자동으로 따라갔고(redirect: 'follow'),
+//   그 결과 GET 으로 /exec 에 닿아 doGet 이 잠금값 없이 돌아 'unauthorized' 를 돌려줬다.
+//   → 잠금값이 멀쩡한데 "토큰이 다르다"는 가짜 진단이 나왔다.
+//   고친 방법: 넘김은 '한 걸음씩 손으로' 따라간다. 어느 걸음에서든 /exec 로 돌아오면
+//   그 시도는 버리고 처음부터 다시 POST 한다. 기다리는 간격도 넉넉히 둔다
+//   (사람이 30분 뒤 손으로 다시 돌리면 성공했다 — 잠깐 지나가는 문제라는 뜻).
+const BRIDGE_TRIES = 5;
+// 기다리는 간격 — 짧게 몰아 붙이면 같은 장애를 5번 맞을 뿐이다.
+// 총 대기 약 1분 40초. 한 번 실패했을 때 '잠깐 지나가는 문제'를 넘길 만큼은 기다린다.
+const BRIDGE_BACKOFF_MS = [3000, 10000, 30000, 60000];
+const BRIDGE_MAX_HOPS = 3;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 넘김(302)을 손으로 따라가 진짜 답을 받아온다.
+ * 자동 따라가기(redirect: 'follow')는 절대 쓰지 않는다 — POST 가 GET 으로 바뀌어
+ * 본문(잠금값)이 사라지고, 엉뚱하게 doGet 이 실행된다.
+ */
+async function bridgeFetch(url, options, timeoutMs, fetchImpl) {
+  const doFetch = fetchImpl || fetchWithTimeout;
+  let res = await doFetch(url, { ...(options || {}), redirect: 'manual' }, timeoutMs);
+  for (let hop = 0; res.status >= 300 && res.status < 400; hop++) {
+    if (hop >= BRIDGE_MAX_HOPS) throw new Error('넘김이 계속 이어져 답을 받지 못함');
+    const loc = (res.headers && res.headers.get && res.headers.get('location')) || '';
+    if (!loc) throw new Error('넘김 주소가 비어 있음');
+    if (loc.includes('/exec')) throw new Error('답 주소가 제자리로 돌아옴(구글 쪽 일시 문제)');
+    res = await doFetch(loc, { redirect: 'manual' }, timeoutMs);
+  }
+  return res;
+}
+
 async function bridgeOnce(action, payload, timeoutMs) {
-  const res = await fetchWithTimeout(CFG.bridgeUrl, {
+  const final = await bridgeFetch(CFG.bridgeUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    redirect: 'manual',
     body: JSON.stringify({ token: CFG.bridgeToken, action, ...(payload || {}) }),
   }, timeoutMs);
 
-  let final = res;
-  if (res.status >= 300 && res.status < 400) {
-    const loc = res.headers.get('location') || '';
-    if (!loc) throw new Error('넘김 주소가 비어 있음');
-    if (loc.includes('/exec')) throw new Error('넘김이 제자리로 돌아옴(본문이 사라진다)');
-    final = await fetchWithTimeout(loc, { redirect: 'follow' }, timeoutMs);
-  }
   if (!final.ok) throw new Error(`HTTP ${final.status}`);
 
   const text = await final.text();
@@ -197,19 +221,25 @@ async function bridgeOnce(action, payload, timeoutMs) {
 
 async function bridgeCall(action, payload, timeoutMs) {
   let last = null;
+  const reasons = [];
   for (let i = 1; i <= BRIDGE_TRIES; i++) {
     try { return await bridgeOnce(action, payload, timeoutMs); }
     catch (e) {
       last = e;
+      reasons.push(String(e && e.message));
       console.error(`[sheet] ${action} ${i}/${BRIDGE_TRIES} 실패: ${safeMsg(e)}`);
-      if (i < BRIDGE_TRIES) await sleep(800 * i);
+      if (i < BRIDGE_TRIES) await sleep(BRIDGE_BACKOFF_MS[i - 1] || 15000);
     }
   }
-  if (String(last && last.message) === 'UNAUTHORIZED') {
-    throw new Error('시트 브리지 ' + action + ' 실패: 잠금값이 다르거나 본문이 중간에 사라짐 ' +
+  // ★ 잠금값을 의심하는 건 '매번 똑같이 unauthorized' 일 때만 한다(2026-09-10).
+  //   잠금값이 틀렸다면 예외 없이 매번 같은 답이 온다. 사유가 섞여 있으면
+  //   잠금값 문제가 아니라 구글이 답을 못 돌려준 것이다 — 엉뚱한 곳을 뒤지게 만들면 안 된다.
+  if (reasons.length && reasons.every((r) => r === 'UNAUTHORIZED')) {
+    throw new Error('시트 브리지 ' + action + ' 실패: 잠금값이 맞지 않습니다 ' +
       '(GitHub SHEET_BRIDGE_TOKEN 과 앱스스크립트 ACCESS_TOKEN 이 같은지 확인)');
   }
-  throw new Error(`시트 브리지 ${action} 실패: ${safeMsg(last)}`);
+  throw new Error(`시트 브리지 ${action} 실패: 구글이 답을 돌려주지 못했습니다 ` +
+    `(${BRIDGE_TRIES}번 시도 · 마지막 사유: ${safeMsg(last)})`);
 }
 
 // 시트 읽기 → parseSheet + 담당자가 채널에서 바꾼 설정
@@ -341,4 +371,4 @@ if (isMain) {
   });
 }
 
-export { CFG, kstNow, splitForTelegram, splitBlockByLines };
+export { CFG, kstNow, splitForTelegram, splitBlockByLines, bridgeFetch, BRIDGE_TRIES, BRIDGE_MAX_HOPS };
