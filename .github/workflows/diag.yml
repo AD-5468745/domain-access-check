@@ -245,6 +245,15 @@ jobs:
           echo "결과: 성공 $ok / 실패 $bad"
           { echo "## D. VPN 켜고 · 진짜 읽기"; echo "- 출구 국가: $C"; echo "- **성공 $ok / 실패 $bad** (8회)"; echo; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: E. VPN 켜고 · 고친 코드 그대로 읽기
+        continue-on-error: true
+        env:
+          SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
+          SHEET_BRIDGE_TOKEN: ${{ secrets.SHEET_BRIDGE_TOKEN }}
+          PROBE_TRIES: '8'
+          PROBE_TITLE: 'E. VPN 켜고 · 고친 코드 그대로 읽기'
+        run: node tools/bridge-probe.mjs
+
       - name: 뒷정리
         if: always()
         run: |
