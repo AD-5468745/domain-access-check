@@ -1042,7 +1042,12 @@ function wakeRelay_() {
 }
 
 function dispatchWorkflow_(reason) {
-  ghDispatch_(prop_('WORKFLOW_FILE', 'check.yml'), { mode: reason || 'manual' });
+  // ★ 2026-09-10 — 점검기는 이제 도메인 목록을 시트에서 직접 읽는다.
+  //   그때 '알림 수준'까지 시트에서 읽을 수는 없으므로, 실행을 걸 때 같이 넘겨준다.
+  //   all / problem 두 값뿐이라 공개 기록에 남아도 문제 없다.
+  var notify = '';
+  try { notify = String(settings_().notify || ''); } catch (ignore) { notify = ''; }
+  ghDispatch_(prop_('WORKFLOW_FILE', 'check.yml'), { mode: reason || 'manual', notify: notify });
 
   setProp_('LAST_DISPATCH_AT', nowKst_());
   setProp_('RUN_STATE', '실행중');

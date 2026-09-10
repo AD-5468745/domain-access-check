@@ -12,6 +12,10 @@ on:
         description: '실행 방식(기록용) — auto / manual'
         required: false
         default: 'manual'
+      notify:
+        description: "알림 수준 — all / problem (담당자가 채널에서 정한 값)"
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -183,6 +187,11 @@ jobs:
         env:
           SHEET_BRIDGE_URL: ${{ secrets.SHEET_BRIDGE_URL }}
           SHEET_BRIDGE_TOKEN: ${{ secrets.SHEET_BRIDGE_TOKEN }}
+          # ★ 도메인 목록은 이 시트에서 직접 내려받는다(왕복이 없어 안 어긋난다).
+          #   비워 두면 예전처럼 브리지로 읽는다 — 어느 쪽이든 멈추지 않는다.
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          SHEET_GID: ${{ vars.SHEET_GID || '0' }}
+          NOTIFY_LEVEL: ${{ inputs.notify }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EXPECT_COUNTRY: KR

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeDomain, normalizeTarget, registrableDomain, sameSite, parseSheet, roundLabel,
   buildSheetRows, buildTelegramReport, countByStatus, groupProblems,
-  statusCell, escapeHtml, SHEET_HEADER,
+  statusCell, escapeHtml, SHEET_HEADER, parseCsv,
 } from '../lib/core.js';
 import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked, looksKoreaBlocked, isIdnHost, asciiHost } from '../lib/probe.js';
 import { recheckBlocked, recheckOne } from '../lib/browser.js';
@@ -762,6 +762,38 @@ await ta('다른 주소로 넘어간 뒤 403 이어도 이동을 알려준다', 
 await ta('같은 사이트로 넘어간 403 은 이동 표시 없음', async () => {
   const r = await checkOne({ company: 'A', domain: 'a.com' }, { fetchImpl: async () => ({ status: 403, url: 'https://www.a.com/' }) });
   assert.equal(r.redirectTo, '');
+});
+
+// ── 1-9. 시트 CSV 읽기 (2026-09-10 — 브리지를 안 거치는 길) ──
+t('보통 표를 읽는다', () => {
+  assert.deepEqual(parseCsv('가업체,나업체\na.com,b.com\n'), [['가업체','나업체'],['a.com','b.com']]);
+});
+t('따옴표 안의 쉼표는 값의 일부다', () => {
+  assert.deepEqual(parseCsv('"가, 나",다\n'), [['가, 나','다']]);
+});
+t('따옴표 두 개는 따옴표 한 글자', () => {
+  assert.deepEqual(parseCsv('"큰""따옴표",x\n'), [['큰"따옴표','x']]);
+});
+t('따옴표 안의 줄바꿈은 줄을 나누지 않는다', () => {
+  assert.deepEqual(parseCsv('"윗줄\n아랫줄",x\n'), [['윗줄\n아랫줄','x']]);
+});
+t('빈 칸이 그대로 유지된다 (열 위치가 밀리면 업체가 뒤바뀐다)', () => {
+  assert.deepEqual(parseCsv('a,,c\n'), [['a','','c']]);
+});
+t('윈도우 줄바꿈(CRLF)도 읽는다', () => {
+  assert.deepEqual(parseCsv('a,b\r\nc,d\r\n'), [['a','b'],['c','d']]);
+});
+t('엑셀이 붙이는 BOM 을 걷어낸다', () => {
+  assert.deepEqual(parseCsv('\ufeff가,나\n'), [['가','나']]);
+});
+t('빈 내용은 빈 표', () => assert.deepEqual(parseCsv(''), []));
+t('끝 줄바꿈이 빈 줄을 만들지 않는다', () => assert.equal(parseCsv('a\n').length, 1));
+t('★ 시트에서 바로 읽어도 업체·도메인이 그대로 갈린다', () => {
+  const csv = '짱구,투게더\nhttps://zz-gu.com,https://tg-gg.com\n짱구메인.com,\n';
+  const { domains } = parseSheet(parseCsv(csv));
+  assert.equal(domains.length, 3);
+  assert.deepEqual(domains.map((d) => d.company), ['짱구', '짱구', '투게더']);
+  assert.equal(domains[1].domain, '짱구메인.com', '한글주소도 적은 그대로');
 });
 
 // ── 2-9. 브리지 답 받아오기 (2026-09-10 사고) ────────────────

@@ -4,13 +4,16 @@
 //   3) 각 도메인 한국 IP로 접속 점검
 //   4) 앱스스크립트 브리지로 '결과' 탭에 표 기록
 //   5) 텔레그램으로 요약 발송
-import { parseSheet, buildSheetRows, buildTelegramReport, roundLabel } from './lib/core.js';
+import { parseSheet, buildSheetRows, buildTelegramReport, roundLabel, parseCsv } from './lib/core.js';
 import { checkMany, posNum } from './lib/probe.js';
 
 // ── 설정(환경변수/시크릿) ──────────────────────────────────────
 const CFG = {
   bridgeUrl: process.env.SHEET_BRIDGE_URL || '',     // 앱스스크립트 웹앱 URL
   bridgeToken: process.env.SHEET_BRIDGE_TOKEN || '', // 앱스스크립트 ACCESS_TOKEN 과 동일
+  sheetId: process.env.SHEET_ID || '',               // 도메인 목록을 직접 내려받을 시트
+  sheetGid: process.env.SHEET_GID || '0',            // '접속점검' 탭
+  notifyLevel: process.env.NOTIFY_LEVEL || '',       // 브리지가 실행을 걸 때 함께 넘겨준다
   botToken: process.env.TELEGRAM_BOT_TOKEN || '',
   chatId: process.env.TELEGRAM_CHAT_ID || '',
   expectCountry: (process.env.EXPECT_COUNTRY || 'KR').toUpperCase(),
@@ -27,6 +30,7 @@ function safeMsg(e) {
   s = s.replace(/token=[^&\s"']*/gi, 'token=***');
   if (CFG.bridgeToken) s = s.split(CFG.bridgeToken).join('***');
   if (CFG.botToken) s = s.split(CFG.botToken).join('***');
+  if (CFG.sheetId) s = s.split(CFG.sheetId).join('***');   // 시트 주소도 공개 로그에 남기지 않는다
   return s.slice(0, 300);
 }
 
@@ -256,8 +260,36 @@ async function bridgeCall(action, payload, timeoutMs) {
     `(${BRIDGE_TRIES}번 시도 · 마지막 사유: ${safeMsg(last)})`);
 }
 
-// 시트 읽기 → parseSheet + 담당자가 채널에서 바꾼 설정
+/**
+ * 도메인 목록 읽기.
+ * ★ 2026-09-10 — 첫째 길은 '시트 파일을 그대로 내려받기'다.
+ *   앱스스크립트 웹앱은 답을 임시 주소로 넘겨주는 왕복이 있는데, 한국 VPN 을
+ *   지날 때 그 왕복이 자주 어긋났다(실측: VPN 끄면 97%, 켜면 83%).
+ *   읽기가 실패하면 점검 전체가 죽으므로 이 길만은 왕복이 없어야 한다.
+ *   시트가 안 열리면 예전처럼 브리지로 읽는다 — 어느 쪽이든 멈추지 않는다.
+ */
+async function readSheetCsv() {
+  const url = `https://docs.google.com/spreadsheets/d/${CFG.sheetId}/export?format=csv&gid=${CFG.sheetGid}`;
+  const res = await fetchWithTimeout(url, { redirect: 'follow' }, 30000);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const text = await res.text();
+  // 공유가 닫혀 있으면 CSV 대신 로그인 안내 페이지(HTML)가 온다 — 그건 실패로 본다.
+  if (/^\s*<(!doctype|html)/i.test(text)) throw new Error('시트가 열려 있지 않음(로그인 안내가 옴)');
+  const values = parseCsv(text);
+  if (!values.length) throw new Error('시트가 비어 있음');
+  return values;
+}
+
 async function readDomains() {
+  if (CFG.sheetId) {
+    try {
+      const values = await readSheetCsv();
+      console.log(`[sheet] 시트에서 직접 읽음 (${values.length}줄)`);
+      return { ...parseSheet(values), settings: { notify: CFG.notifyLevel || undefined } };
+    } catch (e) {
+      console.error(`[sheet] 직접 읽기 실패 → 브리지로 다시 시도: ${safeMsg(e)}`);
+    }
+  }
   const data = await bridgeCall('read');
   if (!data || !data.ok) throw new Error(`시트 브리지 read 오류: ${(data && data.error) || '알수없음'}`);
   return { ...parseSheet(data.values || []), settings: data.settings || {} };
