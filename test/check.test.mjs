@@ -768,9 +768,24 @@ await ta('같은 사이트로 넘어간 403 은 이동 표시 없음', async () 
 //   앱스스크립트는 답을 바로 주지 않고 '임시 답 주소'로 넘긴다.
 //   그 넘김을 자동으로 따라가면 POST 가 GET 으로 바뀌어 잠금값이 사라지고,
 //   /exec 로 되돌아가 doGet 이 'unauthorized' 를 돌려준다 — 가짜 진단의 원인.
+let drained = 0;
 const R = (status, loc, ok) => ({
   status, ok: ok !== undefined ? ok : (status >= 200 && status < 300),
   headers: { get: (k) => (String(k).toLowerCase() === 'location' ? (loc || '') : '') },
+  body: { cancel: async () => { drained++; } },
+});
+
+// ★ 넘김 답의 본문을 안 버리면 연결이 쌓여 다음 요청이 60초 만료된다(2026-09-10 사고).
+await ta('★ 넘김 답의 본문을 반드시 버린다 (연결 반납)', async () => {
+  drained = 0;
+  await bridgeFetch('https://x/exec', { method: 'POST' }, 100,
+    async (u) => (u.includes('/exec') ? R(302, 'https://tmp/answer') : R(200)));
+  assert.equal(drained, 1, '넘김 답을 그냥 두면 그 연결이 묶인 채 남는다');
+});
+await ta('되돌림으로 포기할 때도 본문을 버린다', async () => {
+  drained = 0;
+  await assert.rejects(bridgeFetch('https://x/exec', {}, 100, async () => R(302, 'https://x/exec?a=1')), /제자리/);
+  assert.equal(drained, 1);
 });
 
 await ta('넘김이 없으면 그대로 답이다', async () => {

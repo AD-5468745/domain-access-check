@@ -184,12 +184,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * 자동 따라가기(redirect: 'follow')는 절대 쓰지 않는다 — POST 가 GET 으로 바뀌어
  * 본문(잠금값)이 사라지고, 엉뚱하게 doGet 이 실행된다.
  */
+/**
+ * 안 읽을 답의 본문은 반드시 버린다(연결 반납).
+ * ★ 2026-09-10 — 넘김(302) 응답의 본문을 안 버리면 그 연결이 반납되지 않고 쌓인다.
+ *   빠른 회선에서는 티가 안 나지만, 한국 VPN 처럼 느린 길에서는 다음 요청이
+ *   묶은 연결을 기다리다 60초 만료(aborted)가 나거나, 엉뚱한 답(404)을 받는다.
+ *   lib/probe.js 는 이미 같은 이유로 본문을 버리고 있다 — 여기만 빠져 있었다.
+ */
+async function drainBody(res) {
+  try {
+    if (res && res.body && typeof res.body.cancel === 'function') await res.body.cancel();
+  } catch { /* 이미 닫혔으면 그만 */ }
+}
+
 async function bridgeFetch(url, options, timeoutMs, fetchImpl) {
   const doFetch = fetchImpl || fetchWithTimeout;
   let res = await doFetch(url, { ...(options || {}), redirect: 'manual' }, timeoutMs);
   for (let hop = 0; res.status >= 300 && res.status < 400; hop++) {
-    if (hop >= BRIDGE_MAX_HOPS) throw new Error('넘김이 계속 이어져 답을 받지 못함');
     const loc = (res.headers && res.headers.get && res.headers.get('location')) || '';
+    await drainBody(res);                    // 넘김 답의 본문은 쓰지 않는다 → 연결을 바로 반납
+    if (hop >= BRIDGE_MAX_HOPS) throw new Error('넘김이 계속 이어져 답을 받지 못함');
     if (!loc) throw new Error('넘김 주소가 비어 있음');
     if (loc.includes('/exec')) throw new Error('답 주소가 제자리로 돌아옴(구글 쪽 일시 문제)');
     res = await doFetch(loc, { redirect: 'manual' }, timeoutMs);
@@ -204,7 +218,7 @@ async function bridgeOnce(action, payload, timeoutMs) {
     body: JSON.stringify({ token: CFG.bridgeToken, action, ...(payload || {}) }),
   }, timeoutMs);
 
-  if (!final.ok) throw new Error(`HTTP ${final.status}`);
+  if (!final.ok) { await drainBody(final); throw new Error(`HTTP ${final.status}`); }
 
   const text = await final.text();
   let data;
