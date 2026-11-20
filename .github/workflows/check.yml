@@ -50,6 +50,11 @@ jobs:
       #   설치가 실패해도 점검은 계속된다 — 그때는 봇차단이 그대로 보고된다.
       - name: 재확인용 크롬 준비
         continue-on-error: true
+        # ★ 2026-11-20 사고 — 이 단계가 4분 넘게 붙들려 점검 결과가 안 왔다.
+        #   평소 20~30초면 끝나는 '보조 기능'인데, 시간 상한이 없어서 본 점검을
+        #   하염없이 기다리게 만들었다. 크롬이 없어도 점검은 그대로 돌아가므로
+        #   (봇차단은 이미 정상으로 처리한다) 3분에서 끊고 다음으로 넘어간다.
+        timeout-minutes: 3
         run: |
           npm i --no-save --no-audit --no-fund playwright@1.49.1
           npx playwright install --with-deps chromium
