@@ -4,7 +4,7 @@
 //   3) 각 도메인 한국 IP로 접속 점검
 //   4) 앱스스크립트 브리지로 '결과' 탭에 표 기록
 //   5) 텔레그램으로 요약 발송
-import { parseSheet, buildSheetRows, buildTelegramReport, roundLabel, parseCsv } from './lib/core.js';
+import { parseSheet, buildSheetRows, buildTelegramReport, roundLabel, parseCsv, resolveKnownRedirects } from './lib/core.js';
 import { checkMany, posNum } from './lib/probe.js';
 
 // ── 설정(환경변수/시크릿) ──────────────────────────────────────
@@ -355,6 +355,14 @@ async function main() {
         console.error('[browser] 재확인 실패:', safeMsg(e));
       }
     }
+  }
+
+  // 3-05) 같은 업체에 이미 등록된 주소로 넘어가는 것은 정상으로 돌린다(에이든 지시 2026-11-20).
+  //   업체가 옛 주소를 새 주소로 넘기도록 해둔 것이라 접속에는 문제가 없다.
+  //   목록에 없는 낯선 주소로 넘어갈 때만 🔀 로 알린다.
+  {
+    const n = resolveKnownRedirects(results);
+    if (n) console.log(`[redirect] 등록된 주소로 넘어간 ${n}개를 정상으로 처리`);
   }
 
   // 3-1) 점검 도중 VPN이 끊겼는지 다시 확인 — 끊겼다면 이 결과는 한국 결과가 아니다(가짜 결과 방지)

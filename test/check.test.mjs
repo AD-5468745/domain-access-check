@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeDomain, normalizeTarget, registrableDomain, sameSite, parseSheet, roundLabel,
   buildSheetRows, buildTelegramReport, countByStatus, groupProblems,
-  statusCell, escapeHtml, SHEET_HEADER, parseCsv,
+  statusCell, escapeHtml, SHEET_HEADER, parseCsv, resolveKnownRedirects,
 } from '../lib/core.js';
 import { judgeStatus, describeNetworkError, checkOne, checkMany, posNum, looksBotBlocked, looksKoreaBlocked, isIdnHost, asciiHost } from '../lib/probe.js';
 import { recheckBlocked, recheckOne } from '../lib/browser.js';
@@ -762,6 +762,75 @@ await ta('다른 주소로 넘어간 뒤 403 이어도 이동을 알려준다', 
 await ta('같은 사이트로 넘어간 403 은 이동 표시 없음', async () => {
   const r = await checkOne({ company: 'A', domain: 'a.com' }, { fetchImpl: async () => ({ status: 403, url: 'https://www.a.com/' }) });
   assert.equal(r.redirectTo, '');
+});
+
+// ── 1-8b. 아는 주소로 넘어가는 리다이렉트 (2026-11-20 지시) ──
+//   업체가 옛 주소를 새 주소로 넘기도록 해둔 것은 접속에 문제가 없다 → 정상.
+//   단, 목록에 없는 낯선 주소로 넘어가면 그건 알려야 한다.
+const RD = (company, domain, status, redirectTo) =>
+  ({ company, domain, status, redirectTo: redirectTo || '', note: status === 'redir' ? '주소확인(리다이렉트 감지)' : '정상' });
+
+t('★ 같은 업체에 등록된 주소로 넘어가면 정상', () => {
+  const rows = [
+    RD('아이스', 'https://zz-gu.com', 'redir', 'ice0101.com'),
+    RD('아이스', 'https://ice0101.com', 'up'),
+  ];
+  assert.equal(resolveKnownRedirects(rows), 1);
+  assert.equal(rows[0].status, 'up');
+  assert.equal(/등록된 주소로 연결/.test(rows[0].note), true);
+  assert.equal(/ice0101\.com/.test(rows[0].note), true, '어디로 갔는지는 남긴다');
+});
+t('www·대문자·스킴이 달라도 같은 주소로 본다', () => {
+  const rows = [
+    RD('버블', 'tg-dd.com', 'redir', 'www.BUBB-7942.com'),
+    RD('버블', 'https://bubb-7942.com/', 'up'),
+  ];
+  assert.equal(resolveKnownRedirects(rows), 1);
+  assert.equal(rows[0].status, 'up');
+});
+t('★ 목록에 없는 낯선 주소로 넘어가면 그대로 알린다', () => {
+  const rows = [
+    RD('레고', 'https://lg-oo.com', 'redir', 'nugu-mollaa.com'),
+    RD('레고', 'https://le-go-3113.com', 'up'),
+  ];
+  assert.equal(resolveKnownRedirects(rows), 0);
+  assert.equal(rows[0].status, 'redir', '모르는 주소면 반드시 알려야 한다');
+});
+t('★ 다른 업체 주소로 넘어가면 알린다 (섞이면 사고)', () => {
+  const rows = [
+    RD('아이스', 'https://zz-gu.com', 'redir', 'bubb-7942.com'),
+    RD('버블', 'https://bubb-7942.com', 'up'),
+  ];
+  assert.equal(resolveKnownRedirects(rows), 0);
+  assert.equal(rows[0].status, 'redir');
+});
+t('이상·제한은 건드리지 않는다', () => {
+  const rows = [
+    RD('아이스', 'a.com', 'down', 'ice0101.com'),
+    RD('아이스', 'b.com', 'warn', 'ice0101.com'),
+    RD('아이스', 'https://ice0101.com', 'up'),
+  ];
+  assert.equal(resolveKnownRedirects(rows), 0);
+  assert.deepEqual(rows.map((r) => r.status), ['down', 'warn', 'up']);
+});
+t('빈 값이 와도 터지지 않는다', () => {
+  assert.equal(resolveKnownRedirects(null), 0);
+  assert.equal(resolveKnownRedirects([]), 0);
+  assert.equal(resolveKnownRedirects([null, { status: 'redir' }]), 0);
+});
+t('★ 실제 11-20 결과 8건이 전부 정상으로 바뀐다', () => {
+  const rows = [
+    RD('아이스', 'https://zz-gu.com', 'redir', 'ice0101.com'), RD('아이스', 'ice0101.com', 'up'),
+    RD('버블', 'https://tg-gg.com', 'redir', 'bubb-7942.com'),
+    RD('버블', 'tg-dd.com', 'redir', 'bubb-7942.com'),
+    RD('버블', 'lf-ca.com', 'redir', 'bubb-7942.com'), RD('버블', 'https://bubb-7942.com', 'up'),
+    RD('레고', 'https://lg-oo.com', 'redir', 'le-go-3113.com'), RD('레고', 'le-go-3113.com', 'up'),
+    RD('호빵맨', 'https://hb-mm.com', 'redir', 'hmmh-77.com'), RD('호빵맨', 'hmmh-77.com', 'up'),
+    RD('도라에몽', 'https://dm-oo.com', 'redir', 'do-6363.com'), RD('도라에몽', 'do-6363.com', 'up'),
+    RD('올라프', 'https://gg-ca.com', 'redir', 'ol-4466.com'), RD('올라프', 'ol-4466.com', 'up'),
+  ];
+  assert.equal(resolveKnownRedirects(rows), 8);
+  assert.equal(rows.filter((r) => r.status === 'redir').length, 0);
 });
 
 // ── 1-9. 시트 CSV 읽기 (2026-09-10 — 브리지를 안 거치는 길) ──
